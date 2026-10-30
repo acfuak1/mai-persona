@@ -1,0 +1,310 @@
+{
+  "schema_version": 2,
+  "required_capabilities": [
+    "declarative_basic"
+  ],
+  "workspace_title": "Mai Persona",
+  "pages": [
+    {
+      "id": "overview",
+      "title": "运行概览",
+      "placement": "workspace",
+      "mode": "declarative",
+      "icon": "chart",
+      "description": "查看 Mai Persona 维护的生活状态、事件线、关系与日记。",
+      "queries": {
+        "snapshot": {
+          "api": "webui_snapshot",
+          "version": "1"
+        }
+      },
+      "auto_refresh": true,
+      "poll_interval_seconds": 30,
+      "content": [
+        {
+          "type": "grid",
+          "columns": 4,
+          "children": [
+            {
+              "type": "stat",
+              "label": "运行状态",
+              "value": {
+                "source": "snapshot",
+                "field": "status"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "当前心境",
+              "value": {
+                "source": "snapshot",
+                "field": "mood_label"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "即时情绪",
+              "value": {
+                "source": "snapshot",
+                "field": "emotion_label"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "活跃事件线",
+              "value": {
+                "source": "snapshot",
+                "field": "event_count"
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "columns": 3,
+          "children": [
+            {
+              "type": "stat",
+              "label": "心境 P",
+              "value": {
+                "source": "snapshot",
+                "field": "mood.p"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "心境 A",
+              "value": {
+                "source": "snapshot",
+                "field": "mood.a"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "心境 D",
+              "value": {
+                "source": "snapshot",
+                "field": "mood.d"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "即时情绪 P",
+              "value": {
+                "source": "snapshot",
+                "field": "emotion.p"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "即时情绪 A",
+              "value": {
+                "source": "snapshot",
+                "field": "emotion.a"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "即时情绪 D",
+              "value": {
+                "source": "snapshot",
+                "field": "emotion.d"
+              }
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "label": "当前安排",
+          "value": {
+            "source": "snapshot",
+            "field": "activity"
+          }
+        },
+        {
+          "type": "text",
+          "label": "状态更新时间",
+          "value": {
+            "source": "snapshot",
+            "field": "updated_at"
+          }
+        },
+        {
+          "type": "tabs",
+          "children": [
+            {
+              "type": "stack",
+              "label": "事件线",
+              "children": [
+                {
+                  "type": "table",
+                  "label": "活跃事件",
+                  "value": {
+                    "source": "snapshot",
+                    "field": "event_lines"
+                  },
+                  "columns": [
+                    {
+                      "field": "title",
+                      "label": "标题"
+                    },
+                    {
+                      "field": "stage",
+                      "label": "阶段"
+                    },
+                    {
+                      "field": "content",
+                      "label": "进展"
+                    },
+                    {
+                      "field": "talkable",
+                      "label": "提及倾向"
+                    },
+                    {
+                      "field": "started_at",
+                      "label": "开始时间"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "stack",
+              "label": "日记",
+              "children": [
+                {
+                  "type": "table",
+                  "label": "近期日记",
+                  "value": {
+                    "source": "snapshot",
+                    "field": "diaries"
+                  },
+                  "columns": [
+                    {
+                      "field": "date",
+                      "label": "日期"
+                    },
+                    {
+                      "field": "preview",
+                      "label": "内容"
+                    },
+                    {
+                      "field": "created_at",
+                      "label": "生成时间"
+                    }
+                  ],
+                  "selection": "selected_diary",
+                  "detail": "diary_details"
+                }
+              ]
+            },
+            {
+              "type": "stack",
+              "label": "关系与好感",
+              "children": [
+                {
+                  "type": "stat",
+                  "label": "关系记录",
+                  "value": {
+                    "source": "snapshot",
+                    "field": "relationship_count"
+                  }
+                },
+                {
+                  "type": "table",
+                  "label": "用户关系",
+                  "value": {
+                    "source": "snapshot",
+                    "field": "relationships"
+                  },
+                  "columns": [
+                    {
+                      "field": "user_id",
+                      "label": "用户 ID"
+                    },
+                    {
+                      "field": "stage",
+                      "label": "关系阶段"
+                    },
+                    {
+                      "field": "trust",
+                      "label": "信任"
+                    },
+                    {
+                      "field": "intimacy",
+                      "label": "亲密"
+                    },
+                    {
+                      "field": "rapport",
+                      "label": "默契"
+                    },
+                    {
+                      "field": "updated_at",
+                      "label": "更新时间"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "stack",
+              "label": "待办",
+              "children": [
+                {
+                  "type": "stat",
+                  "label": "未完成待办",
+                  "value": {
+                    "source": "snapshot",
+                    "field": "todo_count"
+                  }
+                },
+                {
+                  "type": "table",
+                  "label": "待办事项",
+                  "value": {
+                    "source": "snapshot",
+                    "field": "todos"
+                  },
+                  "columns": [
+                    {
+                      "field": "user_id",
+                      "label": "用户 ID"
+                    },
+                    {
+                      "field": "content",
+                      "label": "事项"
+                    },
+                    {
+                      "field": "due",
+                      "label": "期限"
+                    },
+                    {
+                      "field": "created_at",
+                      "label": "记录时间"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "dialog",
+          "name": "diary_details",
+          "label": "日记正文",
+          "children": [
+            {
+              "type": "text",
+              "value": {
+                "scope": "selection",
+                "source": "selected_diary",
+                "field": "content"
+              },
+              "format": "log"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

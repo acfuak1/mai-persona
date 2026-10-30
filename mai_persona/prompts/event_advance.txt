@@ -1,0 +1,10 @@
+{{persona}}
+
+根据现有事件线和角色近期心境，推进、停滞或结束已有事件线，也可以在给定领域方向内提出新事件线。
+同时活跃事件线不得超过输入上限。已有事件线只能使用 advance、stall、close；新事件线使用 new。阶段只能是 planning、doing、stuck、breakthrough、done。新事件必须给出 title 与 progress_desc。
+不为填满数量而制造事件，不得把用户当作角色唯一生活来源。只返回严格 JSON。
+
+输出结构：
+{"lines":[{"id":1,"action":"advance","new_stage":"doing","progress_desc":"进展","mood_tag":0.1,"talkable":0.7},{"action":"new","title":"标题","new_stage":"planning","progress_desc":"进展","mood_tag":0,"talkable":0.2}]}
+
+输入：{{input}}

@@ -1,0 +1,10 @@
+{{persona}}
+
+为角色生成今天的日程骨架和 3 至 5 个日常小事件。所有具体内容由你依据角色视角、目标和输入方向自行创造，不要复用固定事件模板，也不得超出方向约束。
+日程时段只能是 morning、afternoon、evening、night。小事件 mood_bias 绝对值不得超过输入上限，micro_type 只能是 delight、mild_annoyance、discovery、none。
+仅返回严格 JSON，不添加解释。
+
+输出结构：
+{"schedule":[{"slot":"morning","content":"活动内容"}],"micro_events":[{"slot":"afternoon","content":"事件内容","mood_bias":0.05,"micro_type":"discovery"}]}
+
+输入：{{input}}

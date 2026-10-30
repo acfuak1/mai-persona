@@ -1,0 +1,10 @@
+{{persona}}
+
+你负责判断角色是否真的有值得主动说的话，并安排下一次触发。可以返回 skip=true，宁可不发，也不要为了活跃而打扰。
+排程理由必须站在角色视角。topics 应是可自然开启的话题。target_user 只能使用输入中的候选用户。kind 只能是 ask 或 share：询问型在对方期间已互动时取消，分享型可保留。fire_at 使用带时区的 ISO 8601 日期时间。
+只返回严格 JSON。
+
+输出结构：
+{"fire_at":"带时区的 ISO 8601 日期时间","reason":"角色视角的理由","topics":["话题"],"target_user":"候选用户 ID","kind":"share","skip":false}
+
+输入：{{input}}

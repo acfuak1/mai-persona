@@ -1,0 +1,53 @@
+[plugin]
+enabled = false
+# 由 MaiBot Runner 维护，请勿手动修改
+config_version = "1.0.0"
+timezone = "Asia/Shanghai"
+tick_seconds = 60
+max_interaction_chars = 1200
+retry_cooldown_minutes = 15.0
+enable_proactive_messages = false
+
+[persona]
+name = ""
+viewpoint = []
+goals = ""
+relationship_stages = []
+event_line_domains = []
+micro_event_domains = []
+
+[emotion]
+trait_p = 0.0
+trait_a = 0.0
+trait_d = 0.0
+tau_emotion_min = 20.0
+tau_mood_hours = 12.0
+regulation = 0.65
+appraisal_window_hours = 2.0
+max_delta_per_event = 0.3
+max_micro_event_bias = 0.15
+
+[affection]
+evaluate_daily_at = "23:00"
+max_delta = 0.1
+evidence_hours = 24.0
+
+[event_lines]
+max_active = 3
+advance_times = ["13:00", "21:00"]
+talkable_threshold = 0.6
+
+[schedule]
+min_interval_hours = 4.0
+daily_limit = 3
+silent_hours = [1, 7]
+default_active_hour_hint = 21
+fallback_replan_hours = 24.0
+
+[batch]
+todo_extract_hours = 4.0
+life_generate_at = "08:00"
+diary_generate_at = "23:30"
+
+[exposure]
+daily_limit = 2
