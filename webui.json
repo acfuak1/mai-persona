@@ -123,6 +123,30 @@
         },
         {
           "type": "text",
+          "label": "日程来源",
+          "value": {
+            "source": "snapshot",
+            "field": "activity_source"
+          }
+        },
+        {
+          "type": "text",
+          "label": "日程连接状态",
+          "value": {
+            "source": "snapshot",
+            "field": "schedule_status"
+          }
+        },
+        {
+          "type": "text",
+          "label": "今日活动概览",
+          "value": {
+            "source": "snapshot",
+            "field": "schedule_context"
+          }
+        },
+        {
+          "type": "text",
           "label": "状态更新时间",
           "value": {
             "source": "snapshot",

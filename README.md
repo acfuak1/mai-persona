@@ -47,10 +47,20 @@ MaiBot WebUI 工作区的“Mai Persona”页面提供只读概览，可查看�
 - `[affection]`：每日关系评估时刻、变化上限和事实回溯时长。
 - `[event_lines]`：活跃事件线数量、每日推进时刻和提及阈值。
 - `[schedule]`：主动联系频率、每日上限、静默时段和重新评估间隔。
-- `[batch]`：待办整理、日常安排和日记整理时刻。
+- `[batch]`：待办整理、日常安排和日记整理时刻，以及 MaiTrace 日程兼容开关。
 - `[exposure]`：Planner 每日查询完整内在状态的次数上限。
 
 设置页可直接配置。需要本地 TOML 时，复制 `config.example.toml` 为 `config.toml`；`.gitignore` 已排除本地配置与运行数据。请勿提交包含个人角色资料的 `config.toml`。
+
+### MaiTrace 日程兼容
+
+在设置页“日常维护任务”中开启“使用 MaiTrace 日程”即可。该选项默认关闭；开启后 Mai Persona 会每 5 分钟只读获取一次当前活动快照，并将当前活动和接下来的活动注入 Planner、Replyer 与 WebUI。Mai Persona 不会再生成或保存自己的日程，但仍会维护日常小事件、情绪和事件线。
+
+MaiTrace 以 `Rabbit-Jia-Er.MaiTrace` 插件 ID 暴露 `get_current_activity` 和 `get_schedule(day)` 只读 API。请同时安装并启用 MaiTrace，并确认其日程功能已启用。兼容层通过 MaiBot SDK 的插件 API 代理读取当前活动和当天时间线，不直接依赖对方代码，也不会修改对方的日程数据。若接口未安装、未启用或调用失败，Mai Persona 会显示“暂不可用”，不会回退展示可能过期的本地日程；可在日志中查看具体错误。
+
+WebUI 的日程区显示当前活动、MaiTrace 当天已记录的时间线和后续活动概览。MaiTrace 只返回其 API 可见的日程，不包含插件未公开的数据。
+
+兼容开启期间，`[batch].life_generate_at` 仍用于触发 Mai Persona 的日常小事件生成。关闭兼容后恢复由 Mai Persona 自行生成日程。
 
 ## 测试
 

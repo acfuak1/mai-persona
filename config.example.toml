@@ -47,6 +47,8 @@ fallback_replan_hours = 24.0
 [batch]
 todo_extract_hours = 4.0
 life_generate_at = "08:00"
+# 开启后只读使用 MaiTrace 日程；日常小事件仍由 Mai Persona 维护
+use_maitrace_schedule = false
 diary_generate_at = "23:30"
 
 [exposure]

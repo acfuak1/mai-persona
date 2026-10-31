@@ -360,10 +360,17 @@ class BatchConfig(PluginConfigBase):
     )
     life_generate_at: str = _ui_field(
         "日常安排生成时刻",
-        "到点后加入 Planner 维护队列，等待下一次 Planner 轮次生成。",
+        "到点后加入 Planner 维护队列，等待下一次 Planner 轮次生成。启用 MaiTrace 日程后，此项只触发日常小事件生成。",
         default="08:00",
         placeholder="08:00",
         hint="使用 24 小时制，例如 08:00。",
+        group="日程与日记",
+    )
+    use_maitrace_schedule: bool = _ui_field(
+        "使用 MaiTrace 日程",
+        "开启后只读接入 MaiTrace 日程 API，并将当前活动和后续活动提供给 Planner、Replyer。Mai Persona 不再生成自己的日程，但仍会生成日常小事件。",
+        default=False,
+        hint="需要启用 MaiTrace 的日程功能。接口暂不可用时会明确显示不可用，不会用本地旧日程替代；不会向 MaiTrace 写入数据。",
         group="日程与日记",
     )
     diary_generate_at: str = _ui_field(

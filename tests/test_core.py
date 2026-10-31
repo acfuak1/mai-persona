@@ -38,6 +38,11 @@ from mai_persona.engine_relationship import validate_transition
 from mai_persona.engine_schedule import hard_guard
 from mai_persona.prompting import persona_block
 from mai_persona.engine_todos import apply_todo_result
+from mai_persona.maitrace_schedule import (
+    format_schedule_summary,
+    normalize_schedule,
+    normalize_snapshot,
+)
 from mai_persona.mem_adapter import MemoryAdapter
 from mai_persona.storage import PersonaStore
 from mai_persona.webui import build_dashboard_snapshot
@@ -70,6 +75,51 @@ class EmotionTests(unittest.TestCase):
 
 
 class DomainTests(unittest.TestCase):
+    def test_maitrace_schedule_snapshot_is_normalized_and_private_items_filtered(self) -> None:
+        snapshot = normalize_snapshot(
+            {
+                "has_activity": True,
+                "activity": {
+                    "name": "图书馆自习",
+                    "description": "复习课程内容",
+                    "time_window": "14:00-16:00",
+                },
+                "next_activities": [
+                    {"time": "18:00", "name": "晚饭"},
+                    {"time": "20:00", "name": "私人约定", "private": True},
+                ],
+                "error": None,
+            }
+        )
+        self.assertEqual(snapshot["current_activity"]["name"], "图书馆自习")
+        self.assertEqual(len(snapshot["next_activities"]), 1)
+        summary = format_schedule_summary(snapshot)
+        self.assertIn("复习课程内容", summary)
+        self.assertIn("18:00 晚饭", summary)
+        self.assertNotIn("私人约定", summary)
+        timeline = normalize_schedule(
+            [
+                {
+                    "start": "2026-10-31T10:00:00+08:00",
+                    "end": "2026-10-31T11:00:00+08:00",
+                    "name": "阅读",
+                    "description": "读书",
+                }
+            ]
+        )
+        self.assertIn("10:00-11:00 阅读：读书", format_schedule_summary({}, schedule=timeline))
+
+    def test_maitrace_disabled_schedule_response_is_not_treated_as_empty_success(self) -> None:
+        with self.assertRaisesRegex(ValueError, "schedule_disabled"):
+            normalize_snapshot(
+                {
+                    "has_activity": False,
+                    "activity": None,
+                    "next_activities": [],
+                    "error": "schedule_disabled",
+                }
+            )
+
     def test_relationship_only_moves_one_adjacent_stage(self) -> None:
         stages = ["陌生", "熟悉", "朋友", "亲密"]
         self.assertEqual(validate_transition(stages, "", "陌生"), (True, ""))
@@ -198,6 +248,44 @@ class DomainTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_clearing_pending_life_items_preserves_occurred_micro_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = PersonaStore(Path(temp) / "persona.db")
+            try:
+                date = "2026-10-31"
+                store.add_life_items(
+                    date,
+                    [{"slot": "morning", "content": "旧日程"}],
+                    [
+                        {
+                            "slot": "morning",
+                            "content": "已发生的小事",
+                            "mood_bias": 0.0,
+                            "micro_type": "none",
+                        },
+                        {
+                            "slot": "evening",
+                            "content": "尚未发生的小事",
+                            "mood_bias": 0.0,
+                            "micro_type": "none",
+                        },
+                    ],
+                )
+                occurred = store.fetchone(
+                    "SELECT id FROM daily_life WHERE content='已发生的小事'"
+                )
+                store.mark_life_occurred(int(occurred["id"]))
+
+                store.clear_pending_life_items(date)
+
+                rows = store.fetchall("SELECT kind, content, occurred FROM daily_life WHERE date=?", (date,))
+                self.assertEqual(
+                    rows,
+                    [{"kind": "micro_event", "content": "已发生的小事", "occurred": 1}],
+                )
+            finally:
+                store.close()
+
     def test_planner_work_deduplicates_by_key_and_returns_existing_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = PersonaStore(Path(temp) / "persona.db")
@@ -352,6 +440,7 @@ class PluginContractTests(unittest.TestCase):
         self.assertEqual(example["emotion"]["tau_emotion_min"], 20.0)
         self.assertEqual(example["exposure"]["daily_limit"], 2)
         self.assertEqual(loaded.batch.life_generate_at, "08:00")
+        self.assertFalse(loaded.batch.use_maitrace_schedule)
         self.assertIn(
             "/config.toml",
             (PLUGIN_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines(),
@@ -432,6 +521,10 @@ class PluginContractTests(unittest.TestCase):
         self.assertEqual(schema["sections"]["persona"]["order"], 0)
         self.assertEqual(schema["sections"]["plugin"]["order"], 1)
         self.assertEqual(schema["sections"]["plugin"]["fields"]["enable_proactive_messages"]["order"], 1)
+        self.assertEqual(
+            schema["sections"]["batch"]["fields"]["use_maitrace_schedule"]["label"],
+            "使用 MaiTrace 日程",
+        )
 
     def test_enabled_plugin_waits_for_persona_configuration_without_failing_load(self) -> None:
         module_name = "mai_persona_incomplete_config_test"
@@ -508,6 +601,7 @@ class PluginContractTests(unittest.TestCase):
             {
                 "knowledge.search",
                 "message.get_by_id",
+                "api.call",
                 "send.text",
                 "maisaka.proactive.trigger",
             },
@@ -637,6 +731,97 @@ class PluginContractTests(unittest.TestCase):
             self.assertIn("webui_snapshot", api_names)
             query_names = {query["api"] for query in webui["pages"][0]["queries"].values()}
             self.assertLessEqual(query_names, api_names)
+        finally:
+            sys.modules.pop(module_name, None)
+
+    def test_maitrace_schedule_uses_public_plugin_api(self) -> None:
+        module_name = "mai_persona_maitrace_api_test"
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            PLUGIN_ROOT / "plugin.py",
+            submodule_search_locations=[str(PLUGIN_ROOT)],
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+
+        class FakeAPI:
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def call(self, api_name: str, **kwargs):
+                self.calls.append((api_name, kwargs))
+                if api_name.endswith(".get_schedule"):
+                    return [
+                        {
+                            "start": "2026-10-31T10:00:00+08:00",
+                            "end": "2026-10-31T11:00:00+08:00",
+                            "name": "阅读",
+                        }
+                    ]
+                return {
+                    "has_activity": True,
+                    "activity": {"name": "阅读", "time_window": "10:00-11:00"},
+                    "next_activities": [{"time": "13:00", "name": "散步"}],
+                    "error": None,
+                }
+
+        try:
+            spec.loader.exec_module(module)
+            plugin = module.create_plugin()
+            plugin.set_plugin_config(
+                {
+                    "plugin": {"enabled": True, "config_version": "1.0.0"},
+                    "batch": {"use_maitrace_schedule": True},
+                }
+            )
+            api = FakeAPI()
+            plugin._set_context(types.SimpleNamespace(api=api, logger=Mock(spec=logging.Logger)))
+            now = datetime(2026, 10, 31, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+            asyncio.run(plugin._refresh_maitrace_schedule(now))
+            self.assertEqual(len(api.calls), 2)
+            self.assertEqual(
+                api.calls[0],
+                ("Rabbit-Jia-Er.MaiTrace.get_current_activity", {"version": "1", "chat_id": "global"}),
+            )
+            self.assertEqual(
+                api.calls[1],
+                ("Rabbit-Jia-Er.MaiTrace.get_schedule", {"version": "1", "day": "2026-10-31"}),
+            )
+            self.assertEqual(plugin._activity_snapshot(now)[0], "阅读（10:00-11:00）")
+            self.assertIn("10:00-11:00 阅读", plugin._maitrace_schedule_context(now))
+
+            class FakeStore:
+                saved = None
+
+                def add_life_items(self, date, schedule, micro_events):
+                    self.saved = (date, schedule, micro_events)
+
+                def set_meta(self, key, value):
+                    pass
+
+            plugin._store = FakeStore()
+            applied = asyncio.run(
+                plugin._apply_planner_work(
+                    {"task_type": "life_generate", "payload": {"date": "2026-10-31"}},
+                    {
+                        "schedule": [{"slot": "morning", "content": "本地重复日程"}],
+                        "micro_events": [
+                            {
+                                "slot": "afternoon",
+                                "content": "读到有趣的文章",
+                                "mood_bias": 0.05,
+                                "micro_type": "discovery",
+                            }
+                        ],
+                    },
+                    now,
+                )
+            )
+            self.assertTrue(applied)
+            self.assertEqual(plugin._store.saved[1], [])
+            self.assertEqual(len(plugin._store.saved[2]), 1)
         finally:
             sys.modules.pop(module_name, None)
 

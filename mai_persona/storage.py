@@ -420,6 +420,14 @@ class PersonaStore:
                 )
             self.connection.commit()
 
+    def clear_pending_life_items(self, date: str) -> None:
+        """Clear replaceable daily plans while retaining micro-events already applied."""
+
+        self.execute(
+            "DELETE FROM daily_life WHERE date=? AND (kind='schedule' OR (kind='micro_event' AND occurred=0))",
+            (date,),
+        )
+
     def unoccurred_micro_events(self, date: str, slots: list[str]) -> list[dict[str, Any]]:
         if not slots:
             return []
