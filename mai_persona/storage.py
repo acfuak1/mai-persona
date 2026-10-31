@@ -469,6 +469,18 @@ class PersonaStore:
         )
         return [str(row["user_id"]) for row in rows]
 
+    def recent_interactions(self, stream_id: str, limit: int = 8) -> list[dict[str, Any]]:
+        """按时间正序返回某个会话最近的对话片段，供排程决策参考。"""
+
+        if not stream_id:
+            return []
+        rows = self.fetchall(
+            "SELECT role, content, ts FROM interaction_queue WHERE stream_id=? "
+            "ORDER BY ts DESC, id DESC LIMIT ?",
+            (stream_id, max(1, min(int(limit), 50))),
+        )
+        return list(reversed(rows))
+
     def relationship(self, user_id: str) -> dict[str, Any] | None:
         return self.fetchone("SELECT * FROM relationship WHERE user_id=?", (user_id,))
 

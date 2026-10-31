@@ -1,10 +1,66 @@
-"""主动排程的时间解析与硬性发送护栏。"""
+"""主动排程的时间解析、对话结束识别与硬性发送护栏。"""
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
+
+_END_PUNCTUATION = "。．.！!？?～~…·、,，;；:： \t\r\n　\"'“”‘’（）()[]【】<>《》"
+_END_PARTICLES = "啦呀啊哦喔咯喽嘛吧了呢哈哇唷哟"
+_CONVERSATION_END_PHRASES = (
+    "晚安",
+    "拜拜",
+    "再见",
+    "明天见",
+    "回头聊",
+    "下次聊",
+    "改天聊",
+    "先这样",
+    "先不聊了",
+    "先不聊",
+    "不聊了",
+    "我先忙了",
+    "先忙了",
+    "我忙去了",
+    "去忙了",
+    "我睡了",
+    "先睡了",
+    "去睡了",
+    "睡了",
+    "我下了",
+    "下线了",
+    "我撤了",
+    "先撤了",
+)
+_WHOLE_CONVERSATION_ENDS = {"88", "886", "掰掰"}
+
+
+def is_conversation_end(text: Any) -> bool:
+    """判断一句话是否在明确结束对话；只在句尾匹配，避免“晚安是什么意思”类误判。"""
+
+    value = re.sub(r"\s+", "", str(text or "")).strip(_END_PUNCTUATION)
+    if not value:
+        return False
+    if value in _WHOLE_CONVERSATION_ENDS:
+        return True
+    stripped = value.rstrip(_END_PARTICLES).strip(_END_PUNCTUATION)
+    for candidate in (value, stripped):
+        if candidate and any(candidate.endswith(phrase) for phrase in _CONVERSATION_END_PHRASES):
+            return True
+    return False
+
+
+def user_filter_allows(mode: str, user_id: str, whitelist: list[str], blacklist: list[str]) -> bool:
+    """按 off/whitelist/blacklist 判断某个用户是否参与私聊结束排程。"""
+
+    normalized_mode = str(mode or "off").strip().lower()
+    if normalized_mode == "whitelist":
+        return user_id in {str(item).strip() for item in whitelist}
+    if normalized_mode == "blacklist":
+        return user_id not in {str(item).strip() for item in blacklist}
+    return True
 
 
 def parse_fire_at(value: Any, timezone: ZoneInfo) -> float | None:

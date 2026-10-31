@@ -1,7 +1,10 @@
 {{persona}}
 
 你负责判断角色是否真的有值得主动说的话，并安排下一次触发。可以返回 skip=true，宁可不发，也不要为了活跃而打扰。
-排程理由必须站在角色视角。topics 应是可自然开启的话题。target_user 只能使用输入中的候选用户。kind 只能是 ask 或 share：询问型在对方期间已互动时取消，分享型可保留。fire_at 使用带时区的 ISO 8601 日期时间。
+排程理由必须站在角色视角。topics 应是可自然开启的话题。target_user 只能使用输入中的候选用户。kind 只能是 ask 或 share：询问型在对方期间已互动时取消，分享型可保留。
+fire_at 必须晚于 now 且不早于 now 加 min_interval_hours，使用带时区的 ISO 8601 日期时间并精确到分钟（例如 2026-11-01T21:30+08:00），不要写相对时间。
+当输入 trigger 为 private_chat_end 时，只针对 focus_user_id 决策：结合 conversation 中刚结束的对话、该用户近况和角色当前状态，判断下一次主动联系该用户的时间；target_user 必须等于 focus_user_id。若这段对话没有留下值得再联系的理由，返回 skip=true。
+当输入 trigger 为 fallback 时，从候选用户中挑选最适合的一位。
 只返回严格 JSON。
 
 输出结构：

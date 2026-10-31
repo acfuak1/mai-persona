@@ -331,6 +331,50 @@ class ScheduleConfig(PluginConfigBase):
         step=1,
         group="Planner 排程",
     )
+    decide_after_private_chat_end: bool = _ui_field(
+        "私聊结束后由 Planner 决定下次联系时间",
+        "在私聊中明确结束对话（例如互道晚安、拜拜）后，把当前日期、角色状态和这段对话交给 Planner，由它决定下一次主动联系该用户的时间，精确到分钟。",
+        default=False,
+        hint="只对私聊生效，且需要同时开启“允许主动联系”。触发时只加入一次 Planner 维护任务，不会立即发消息。",
+        group="私聊结束排程",
+    )
+    decide_user_filter_mode: str = _ui_field(
+        "参与用户过滤方式",
+        "off 表示不过滤；whitelist 只对白名单用户生效；blacklist 跳过黑名单用户。",
+        default="off",
+        example="whitelist",
+        hint="填写 off、whitelist 或 blacklist 之一。",
+        group="私聊结束排程",
+    )
+    decide_user_whitelist: list[str] = _ui_field(
+        "白名单用户 ID",
+        "仅在过滤方式为 whitelist 时使用，按用户 ID 精确匹配。",
+        default_factory=list,
+        example=["3510472225"],
+        hint="每项单独填写一个用户 ID。",
+        group="私聊结束排程",
+    )
+    decide_user_blacklist: list[str] = _ui_field(
+        "黑名单用户 ID",
+        "仅在过滤方式为 blacklist 时使用，按用户 ID 精确匹配。",
+        default_factory=list,
+        example=["10001"],
+        hint="每项单独填写一个用户 ID。",
+        group="私聊结束排程",
+    )
+
+    @field_validator("decide_user_filter_mode")
+    @classmethod
+    def validate_decide_user_filter_mode(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"off", "whitelist", "blacklist"}:
+            raise ValueError("参与用户过滤方式只能是 off、whitelist 或 blacklist")
+        return normalized
+
+    @field_validator("decide_user_whitelist", "decide_user_blacklist")
+    @classmethod
+    def validate_decide_user_ids(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
 
     @field_validator("silent_hours")
     @classmethod

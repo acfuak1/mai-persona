@@ -10,7 +10,7 @@ import tempfile
 import tomllib
 import types
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
@@ -35,7 +35,11 @@ from mai_persona.engine_emotion import (
 )
 from mai_persona.engine_life import validate_life_result
 from mai_persona.engine_relationship import validate_transition
-from mai_persona.engine_schedule import hard_guard
+from mai_persona.engine_schedule import (
+    hard_guard,
+    is_conversation_end,
+    user_filter_allows,
+)
 from mai_persona.prompting import persona_block
 from mai_persona.engine_todos import apply_todo_result
 from mai_persona.maitrace_schedule import (
@@ -75,6 +79,26 @@ class EmotionTests(unittest.TestCase):
 
 
 class DomainTests(unittest.TestCase):
+    def test_conversation_end_detection_is_narrow(self) -> None:
+        self.assertTrue(is_conversation_end("晚安"))
+        self.assertTrue(is_conversation_end("那我先睡了，晚安啦～"))
+        self.assertTrue(is_conversation_end("拜拜！"))
+        self.assertTrue(is_conversation_end("88"))
+        self.assertTrue(is_conversation_end("明天见"))
+        self.assertTrue(is_conversation_end("先去忙了"))
+        self.assertFalse(is_conversation_end("晚安是什么意思"))
+        self.assertFalse(is_conversation_end("这个价格是 88"))
+        self.assertFalse(is_conversation_end(""))
+        self.assertFalse(is_conversation_end(None))
+
+    def test_chat_end_user_filter_modes(self) -> None:
+        self.assertTrue(user_filter_allows("off", "u1", ["u1"], ["u1"]))
+        self.assertTrue(user_filter_allows("whitelist", "u1", ["u1"], []))
+        self.assertFalse(user_filter_allows("whitelist", "u2", ["u1"], []))
+        self.assertFalse(user_filter_allows("blacklist", "u1", [], ["u1"]))
+        self.assertTrue(user_filter_allows("blacklist", "u2", [], ["u1"]))
+        self.assertTrue(user_filter_allows("unknown", "u2", [], ["u2"]))
+
     def test_maitrace_schedule_snapshot_is_normalized_and_private_items_filtered(self) -> None:
         snapshot = normalize_snapshot(
             {
@@ -248,6 +272,25 @@ class DomainTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_recent_interactions_returns_chronological_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = PersonaStore(Path(temp) / "persona.db")
+            try:
+                for index in range(5):
+                    store.add_interaction(
+                        1000 + index,
+                        "u1",
+                        "s1",
+                        "user" if index % 2 == 0 else "assistant",
+                        f"m{index}",
+                    )
+                store.add_interaction(2000, "u2", "s2", "user", "其他会话")
+                rows = store.recent_interactions("s1", limit=3)
+                self.assertEqual([row["content"] for row in rows], ["m2", "m3", "m4"])
+                self.assertEqual(store.recent_interactions("missing", limit=3), [])
+            finally:
+                store.close()
+
     def test_clearing_pending_life_items_preserves_occurred_micro_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = PersonaStore(Path(temp) / "persona.db")
@@ -731,6 +774,145 @@ class PluginContractTests(unittest.TestCase):
             self.assertIn("webui_snapshot", api_names)
             query_names = {query["api"] for query in webui["pages"][0]["queries"].values()}
             self.assertLessEqual(query_names, api_names)
+        finally:
+            sys.modules.pop(module_name, None)
+
+    def test_private_chat_end_queues_targeted_schedule_decision(self) -> None:
+        module_name = "mai_persona_chat_end_decide_test"
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            PLUGIN_ROOT / "plugin.py",
+            submodule_search_locations=[str(PLUGIN_ROOT)],
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            with tempfile.TemporaryDirectory() as temp:
+                plugin = module.create_plugin()
+                plugin.set_plugin_config(
+                    {
+                        "plugin": {
+                            "enabled": True,
+                            "config_version": "1.0.0",
+                            "enable_proactive_messages": True,
+                        },
+                        "schedule": {
+                            "decide_after_private_chat_end": True,
+                            "decide_user_filter_mode": "whitelist",
+                            "decide_user_whitelist": ["u1"],
+                        },
+                    }
+                )
+                plugin._set_context(
+                    types.SimpleNamespace(api=Mock(), logger=Mock(spec=logging.Logger))
+                )
+                store = PersonaStore(Path(temp) / "persona.db")
+                plugin._store = store
+                try:
+                    store.initialize_emotion(PAD(0.0, 0.0, 0.0), 1000)
+                    store.add_interaction(1000, "u1", "s1", "user", "晚安")
+                    store.add_interaction(1001, "u1", "s1", "assistant", "晚安，明天见")
+
+                    async def scenario() -> None:
+                        plugin._maybe_decide_after_private_chat_end(
+                            "s1",
+                            {
+                                "user_id": "u1",
+                                "stream_id": "s1",
+                                "is_private": True,
+                                "last_user_text": "晚安",
+                            },
+                            "晚安，明天见",
+                        )
+                        await asyncio.gather(*list(plugin._background_tasks))
+                        plugin._maybe_decide_after_private_chat_end(
+                            "s2",
+                            {
+                                "user_id": "u1",
+                                "stream_id": "s2",
+                                "is_private": False,
+                                "last_user_text": "晚安",
+                            },
+                            "晚安",
+                        )
+                        plugin._maybe_decide_after_private_chat_end(
+                            "s3",
+                            {
+                                "user_id": "u2",
+                                "stream_id": "s3",
+                                "is_private": True,
+                                "last_user_text": "拜拜",
+                            },
+                            "拜拜",
+                        )
+
+                    asyncio.run(scenario())
+
+                    works = store.pending_planner_work(limit=5)
+                    self.assertEqual(len(works), 1)
+                    self.assertEqual(works[0]["task_type"], "schedule_decide")
+                    payload = works[0]["payload"]
+                    self.assertEqual(payload["trigger"], "private_chat_end")
+                    self.assertEqual(payload["focus_user_id"], "u1")
+                    self.assertEqual(payload["candidate_user_ids"], ["u1"])
+                    self.assertEqual(payload["date"], plugin._now().date().isoformat())
+                    self.assertEqual(
+                        [item["content"] for item in payload["conversation"]],
+                        ["晚安", "晚安，明天见"],
+                    )
+
+                    store.set_schedule(
+                        fire_at=plugin._now().timestamp() + 3600,
+                        reason="别的用户",
+                        topics=[],
+                        target_user="u2",
+                        kind="share",
+                        decided_at=plugin._now().timestamp(),
+                    )
+                    applied = asyncio.run(
+                        plugin._apply_planner_work(
+                            {
+                                "task_type": "schedule_decide",
+                                "payload": {
+                                    "focus_user_id": "u1",
+                                    "candidate_user_ids": ["u1"],
+                                },
+                            },
+                            {"skip": True, "reason": "这段对话不需要再联系"},
+                            plugin._now(),
+                        )
+                    )
+                    self.assertTrue(applied)
+                    self.assertEqual(store.get_schedule()["target_user"], "u2")
+
+                    applied = asyncio.run(
+                        plugin._apply_planner_work(
+                            {
+                                "task_type": "schedule_decide",
+                                "payload": {
+                                    "focus_user_id": "u1",
+                                    "candidate_user_ids": ["u1"],
+                                },
+                            },
+                            {
+                                "skip": False,
+                                "target_user": "u1",
+                                "fire_at": (plugin._now() + timedelta(hours=2)).isoformat(),
+                                "reason": "问问近况",
+                                "topics": ["近况"],
+                                "kind": "ask",
+                            },
+                            plugin._now(),
+                        )
+                    )
+                    self.assertTrue(applied)
+                    self.assertEqual(store.get_schedule()["target_user"], "u2")
+                finally:
+                    plugin._store = None
+                    store.close()
         finally:
             sys.modules.pop(module_name, None)
 

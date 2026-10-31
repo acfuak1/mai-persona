@@ -44,7 +44,12 @@ from .mai_persona.maitrace_schedule import (
     normalize_snapshot,
 )
 from .mai_persona.engine_relationship import update_relationship
-from .mai_persona.engine_schedule import hard_guard, parse_fire_at
+from .mai_persona.engine_schedule import (
+    hard_guard,
+    is_conversation_end,
+    parse_fire_at,
+    user_filter_allows,
+)
 from .mai_persona.engine_todos import apply_todo_result
 from .mai_persona.mem_adapter import MemoryAdapter
 from .mai_persona.prompting import persona_block, render_prompt
@@ -500,23 +505,38 @@ class MaiPersonaPlugin(MaiBotPlugin):
         if task_type == "schedule_decide":
             if not isinstance(result, dict) or not isinstance(result.get("skip"), bool):
                 return False
+            focus_user = str(payload.get("focus_user_id", "")).strip()
             store.set_meta("last_schedule_decision_at", now.timestamp())
             store.set_meta("schedule_decision_retry_after", 0)
             if result["skip"]:
-                store.set_schedule(
-                    fire_at=None,
-                    reason=str(result.get("reason", "当前没有合适的主动话题"))[:500],
-                    topics=[],
-                    target_user="",
-                    kind="share",
-                    decided_at=now.timestamp(),
-                )
+                # 私聊结束触发的决策只针对该用户，skip 不能清掉其他用户已排好的主动联系
+                current = store.get_schedule()
+                if not focus_user or (
+                    current is not None and str(current.get("target_user", "")) == focus_user
+                ):
+                    store.set_schedule(
+                        fire_at=None,
+                        reason=str(result.get("reason", "当前没有合适的主动话题"))[:500],
+                        topics=[],
+                        target_user="",
+                        kind="share",
+                        decided_at=now.timestamp(),
+                    )
                 return True
             allowed_users = {str(item) for item in payload.get("candidate_user_ids", [])}
             target_user = str(result.get("target_user", "")).strip()
             fire_at = parse_fire_at(result.get("fire_at"), self._timezone)
             if target_user not in allowed_users or fire_at is None:
                 return False
+            current = store.get_schedule()
+            if (
+                focus_user
+                and current is not None
+                and current.get("fire_at") is not None
+                and str(current.get("target_user", "")) != focus_user
+            ):
+                self.ctx.logger.info("已有其他用户的主动排程，保留现有排程，不采用本次定向决策")
+                return True
             minimum_fire = now.timestamp() + self.config.schedule.min_interval_hours * 3600
             fire_at = max(fire_at, minimum_fire)
             kind = str(result.get("kind", "share")).strip().lower()
@@ -1089,24 +1109,12 @@ class MaiPersonaPlugin(MaiBotPlugin):
             return
         candidates: list[dict[str, Any]] = []
         for user_id in users[:20]:
-            facts = await self._memory.search_facts(
-                f"{user_id} 近期近况、活跃时段、上次互动",
-                user_id=user_id,
-                limit=6,
-            ) if self._memory else []
-            candidates.append(
-                {
-                    "user_id": user_id,
-                    "facts": facts,
-                    "relationship": store.relationship(user_id) or {},
-                    "affection": store.affection(user_id) or {},
-                    "todos": store.open_todos(user_id),
-                    "last_interaction_at": store.last_user_interaction_at(user_id),
-                }
-            )
+            candidates.append(await self._schedule_candidate(user_id))
         start = datetime.combine(now.date() - timedelta(days=3), time.min, tzinfo=self._timezone).timestamp()
         schedule_key = f"schedule_decide:{int(last)}"
         payload = {
+            "trigger": "fallback",
+            "date": now.date().isoformat(),
             "now": now.isoformat(),
             "state": self._state_snapshot(now, ""),
             "users": candidates,
@@ -1115,6 +1123,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
             "min_interval_hours": self.config.schedule.min_interval_hours,
             "daily_limit": self.config.schedule.daily_limit,
             "silent_hours": self.config.schedule.silent_hours,
+            "default_active_hour_hint": self.config.schedule.default_active_hour_hint,
         }
         self._queue_planner_work(
             "schedule_decide",
@@ -1123,6 +1132,102 @@ class MaiPersonaPlugin(MaiBotPlugin):
             schedule_key,
             now,
         )
+
+    async def _schedule_candidate(self, user_id: str) -> dict[str, Any]:
+        """收集单个用户的排程依据；供全局兜底决策和私聊结束决策共用。"""
+
+        store = self._require_store()
+        facts = await self._memory.search_facts(
+            f"{user_id} 近期近况、活跃时段、上次互动",
+            user_id=user_id,
+            limit=6,
+        ) if self._memory else []
+        return {
+            "user_id": user_id,
+            "facts": facts,
+            "relationship": store.relationship(user_id) or {},
+            "affection": store.affection(user_id) or {},
+            "todos": store.open_todos(user_id),
+            "last_interaction_at": store.last_user_interaction_at(user_id),
+        }
+
+    def _chat_end_user_allowed(self, user_id: str) -> bool:
+        schedule_cfg = self.config.schedule
+        return user_filter_allows(
+            schedule_cfg.decide_user_filter_mode,
+            user_id,
+            schedule_cfg.decide_user_whitelist,
+            schedule_cfg.decide_user_blacklist,
+        )
+
+    def _maybe_decide_after_private_chat_end(
+        self,
+        session_id: str,
+        context: dict[str, Any],
+        response: str,
+    ) -> None:
+        """私聊中明确结束对话后，请 Planner 决定下一次主动联系该用户的时间。"""
+
+        schedule_cfg = self.config.schedule
+        if not schedule_cfg.decide_after_private_chat_end:
+            return
+        if not self.config.plugin.enable_proactive_messages:
+            return
+        if not context.get("is_private"):
+            return
+        user_id = str(context.get("user_id", "")).strip()
+        if not user_id or not self._chat_end_user_allowed(user_id):
+            return
+        if not (
+            is_conversation_end(context.get("last_user_text", ""))
+            or is_conversation_end(response)
+        ):
+            return
+        store = self._require_store()
+        current = store.get_schedule()
+        if current and current.get("fire_at") is not None:
+            self.ctx.logger.debug("已有等待发送的主动排程，跳过私聊结束决策")
+            return
+        now = self._now()
+        cooldown_key = f"chat_end_decide_at:{user_id}"
+        last = float(store.get_meta(cooldown_key, "0") or 0.0)
+        if now.timestamp() - last < self.config.plugin.retry_cooldown_minutes * 60:
+            self.ctx.logger.debug("私聊结束决策仍在冷却期内，跳过：%s", user_id)
+            return
+        store.set_meta(cooldown_key, now.timestamp())
+        self._spawn_task(
+            self._queue_chat_end_decision(user_id, str(context.get("stream_id", "") or session_id), now),
+            "persona-chat-end-decide",
+        )
+
+    async def _queue_chat_end_decision(self, user_id: str, stream_id: str, now: datetime) -> None:
+        if not self.config.schedule.decide_after_private_chat_end:
+            return
+        store = self._require_store()
+        start = datetime.combine(now.date() - timedelta(days=3), time.min, tzinfo=self._timezone).timestamp()
+        payload = {
+            "trigger": "private_chat_end",
+            "date": now.date().isoformat(),
+            "now": now.isoformat(),
+            "focus_user_id": user_id,
+            "state": self._state_snapshot(now, user_id),
+            "users": [await self._schedule_candidate(user_id)],
+            "candidate_user_ids": [user_id],
+            "conversation": store.recent_interactions(stream_id, limit=8),
+            "recent_outbound_count": store.outbound_count_today(start),
+            "min_interval_hours": self.config.schedule.min_interval_hours,
+            "daily_limit": self.config.schedule.daily_limit,
+            "silent_hours": self.config.schedule.silent_hours,
+            "default_active_hour_hint": self.config.schedule.default_active_hour_hint,
+        }
+        self._queue_planner_work(
+            "schedule_decide",
+            "schedule_decide",
+            payload,
+            f"chat_end_decide:{user_id}:{int(now.timestamp())}",
+            now,
+        )
+        self.ctx.logger.info("私聊对话结束，已请 Planner 决定下次联系时间：%s", user_id)
 
     async def _run_proactive_schedule(self, now: datetime) -> None:
         if not self.config.plugin.enable_proactive_messages:
@@ -1425,6 +1530,17 @@ class MaiPersonaPlugin(MaiBotPlugin):
         message_id = str(kwargs.get("message_id") or message.get("message_id") or "").strip()
         return user_id, session_id, stream_id, text, ts, message_id
 
+    @staticmethod
+    def _is_private_message(message: Any) -> bool:
+        """MaiBot 的 MessageInfo 只在群聊里带 group_info；缺失或为 None 即私聊。"""
+
+        if not isinstance(message, dict):
+            return False
+        info = message.get("message_info")
+        if not isinstance(info, dict):
+            return False
+        return info.get("group_info") is None
+
     def _record_user_message(
         self,
         *,
@@ -1434,6 +1550,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
         text: str,
         timestamp: float,
         message_id: str,
+        is_private: bool = False,
     ) -> int:
         store = self._require_store()
         existing = None
@@ -1459,7 +1576,12 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 timestamp,
             )
         if session_id:
-            self._session_context[session_id] = {"user_id": user_id, "stream_id": stream_id}
+            self._session_context[session_id] = {
+                "user_id": user_id,
+                "stream_id": stream_id,
+                "is_private": bool(is_private),
+                "last_user_text": text[-400:],
+            }
         if (
             is_new_interaction
             and interaction_id
@@ -1572,6 +1694,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
             text=text[: self.config.plugin.max_interaction_chars],
             timestamp=timestamp,
             message_id=str(message.get("message_id") or message_id),
+            is_private=self._is_private_message(message),
         )
 
     @EventHandler(
@@ -1606,6 +1729,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
             text=text,
             timestamp=now_ts,
             message_id=message_id,
+            is_private=self._is_private_message(message),
         )
         return
 
@@ -1678,6 +1802,8 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 "assistant",
                 response[: self.config.plugin.max_interaction_chars],
             )
+        if response and not isinstance(scheduled, dict):
+            self._maybe_decide_after_private_chat_end(session_id, context, response)
         if session_id:
             self._session_context.pop(session_id, None)
 
