@@ -12,6 +12,8 @@ _EXPLICIT_EMOTION_MARKERS = (
     "高兴",
     "兴奋",
     "满足",
+    "期待",
+    "轻松",
     "难过",
     "伤心",
     "委屈",
@@ -26,12 +28,19 @@ _EXPLICIT_EMOTION_MARKERS = (
     "崩溃",
     "绝望",
     "压力很大",
+    "疲惫",
     "累得",
+    "累了",
     "受不了了",
     "想哭",
     "想死",
     "自杀",
 )
+
+_POSITIVE_EMOTION_MARKERS = ("开心", "高兴", "兴奋", "满足", "期待", "轻松")
+_LOW_AROUSAL_NEGATIVE_MARKERS = ("难过", "伤心", "委屈", "失望", "孤独", "想哭", "绝望", "想死", "自杀")
+_HIGH_AROUSAL_NEGATIVE_MARKERS = ("害怕", "焦虑", "紧张", "生气", "愤怒", "烦躁", "崩溃", "压力很大", "受不了了")
+_FATIGUE_MARKERS = ("疲惫", "累得", "累了")
 
 
 @dataclass(frozen=True)
@@ -118,6 +127,33 @@ def normalize_delta(raw: Any, limit: float) -> PAD:
         return max(-bounded_limit, min(bounded_limit, number))
 
     return PAD(value("p"), value("a"), value("d"))
+
+
+def explicit_emotion_delta(text: str, limit: float = 0.16) -> PAD:
+    """把明确情绪词转换为小幅即时共情变化，避免状态必须等待 Planner 才首次变化。"""
+
+    normalized = str(text or "").strip()
+    magnitude = max(0.0, min(0.2, float(limit)))
+    if not normalized or magnitude <= 0:
+        return PAD(0.0, 0.0, 0.0)
+    if any(marker in normalized for marker in _POSITIVE_EMOTION_MARKERS):
+        return PAD(magnitude, magnitude * 0.65, magnitude * 0.25)
+    if any(marker in normalized for marker in _HIGH_AROUSAL_NEGATIVE_MARKERS):
+        return PAD(-magnitude, magnitude * 0.8, -magnitude * 0.25)
+    if any(marker in normalized for marker in _FATIGUE_MARKERS):
+        return PAD(-magnitude * 0.7, -magnitude * 0.65, -magnitude * 0.2)
+    if any(marker in normalized for marker in _LOW_AROUSAL_NEGATIVE_MARKERS):
+        return PAD(-magnitude, -magnitude * 0.55, -magnitude * 0.2)
+    return PAD(0.0, 0.0, 0.0)
+
+
+def interaction_pulse_delta(text: str, limit: float = 0.04) -> PAD:
+    """为普通新互动提供极小、可恢复的即时接触脉冲。"""
+
+    if not str(text or "").strip():
+        return PAD(0.0, 0.0, 0.0)
+    magnitude = max(0.0, min(0.06, float(limit)))
+    return PAD(magnitude * 0.35, magnitude, 0.0)
 
 
 def has_explicit_emotion(text: str) -> bool:

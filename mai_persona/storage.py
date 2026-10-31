@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable
 
-from .engine_emotion import PAD, decay
+from .engine_emotion import PAD, decay, emotion_label
 
 
 SCHEMA = """
@@ -150,10 +150,23 @@ class PersonaStore:
                 """
                 INSERT OR IGNORE INTO emotion_state
                     (id, trait_p, trait_a, trait_d, mood_p, mood_a, mood_d,
-                     emo_p, emo_a, emo_d, updated_at)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     emo_p, emo_a, emo_d, mood_label, emo_label, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (trait.p, trait.a, trait.d, trait.p, trait.a, trait.d, trait.p, trait.a, trait.d, now),
+                (
+                    trait.p,
+                    trait.a,
+                    trait.d,
+                    trait.p,
+                    trait.a,
+                    trait.d,
+                    trait.p,
+                    trait.a,
+                    trait.d,
+                    emotion_label(trait),
+                    emotion_label(trait),
+                    now,
+                ),
             )
             self.connection.execute(
                 "UPDATE emotion_state SET trait_p=?, trait_a=?, trait_d=? WHERE id=1",
@@ -181,10 +194,22 @@ class PersonaStore:
             )
             self.connection.execute(
                 """
-                UPDATE emotion_state SET mood_p=?, mood_a=?, mood_d=?, emo_p=?, emo_a=?, emo_d=?, updated_at=?
+                UPDATE emotion_state
+                SET mood_p=?, mood_a=?, mood_d=?, emo_p=?, emo_a=?, emo_d=?,
+                    mood_label=?, emo_label=?, updated_at=?
                 WHERE id=1
                 """,
-                (mood.p, mood.a, mood.d, emotion.p, emotion.a, emotion.d, now),
+                (
+                    mood.p,
+                    mood.a,
+                    mood.d,
+                    emotion.p,
+                    emotion.a,
+                    emotion.d,
+                    emotion_label(mood),
+                    emotion_label(emotion),
+                    now,
+                ),
             )
             self.connection.commit()
             return self.emotion()
@@ -563,6 +588,16 @@ class PersonaStore:
             (user_id,),
         )
         return str(row["stream_id"]) if row else ""
+
+    def latest_user_id(self, stream_id: str) -> str:
+        """按聊天流找到最近一条用户消息对应的用户。"""
+
+        row = self.fetchone(
+            "SELECT user_id FROM interaction_queue "
+            "WHERE stream_id=? AND role='user' AND user_id<>'' ORDER BY ts DESC, id DESC LIMIT 1",
+            (stream_id,),
+        )
+        return str(row["user_id"]) if row else ""
 
     def inner_state(self, user_id: str = "") -> dict[str, Any]:
         emotion = self.emotion() or {}

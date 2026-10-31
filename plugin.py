@@ -27,7 +27,9 @@ from .mai_persona.engine_diary import validate_diary
 from .mai_persona.engine_emotion import (
     PAD,
     emotion_label,
+    explicit_emotion_delta,
     has_explicit_emotion,
+    interaction_pulse_delta,
     normalize_delta,
     regulated_expression,
     style_hint,
@@ -195,12 +197,22 @@ class MaiPersonaPlugin(MaiBotPlugin):
 
     def _planner_context(self, now: datetime, user_id: str) -> str:
         store = self._require_store()
-        pending_count = store.fetchone("SELECT COUNT(*) AS count FROM planner_work") or {}
+        pending_work = store.pending_planner_work(limit=4)
         snapshot = self._state_snapshot(now, user_id)
+        pending_summary = ""
+        if pending_work:
+            pending_summary = (
+                f"\n当前有 {len(pending_work)} 项待处理维护任务："
+                + "、".join(
+                    f"#{int(work['id'])} {str(work['task_type'])}"
+                    for work in pending_work
+                )
+                + "。请在本轮 Planner 中优先读取并完成这些任务；维护过程不要作为话题告诉用户。"
+            )
         return (
             "[Mai Persona 角色设定]\n"
             f"{persona_block(self.config.persona)}\n\n"
-            "[Mai Persona 当前状态]\n"
+            "[Mai Persona 当前状态：心境、即时情绪与表达 PAD]\n"
             f"{json.dumps(snapshot, ensure_ascii=False, separators=(',', ':'), default=str)}\n\n"
             "[Mai Persona Planner 协作规则]\n"
             "插件资料仅用于 Mai Persona 的内在状态、生活模拟、关系演进和相关事件判断；"
@@ -208,11 +220,11 @@ class MaiPersonaPlugin(MaiBotPlugin):
             "发生冲突时遵循 MaiBot 自有人格配置与本轮任务。"
             "仅在确有状态维护或查询需要时调用插件工具，不要为了展示插件能力而调用；"
             "关系、情绪和好感变化必须有事实依据，并遵守插件工具说明中的范围限制。"
+            + pending_summary
             + (
-                f"当前有 {int(pending_count.get('count') or 0)} 项待处理的 Mai Persona 维护任务。"
-                "请在适当时调用 get_persona_pending_work 获取任务说明，完成判断后调用 "
-                "complete_persona_work 提交结果；维护过程不要作为话题告诉用户。"
-                if int(pending_count.get("count") or 0) > 0
+                "请调用 get_persona_pending_work 获取任务说明，完成判断后调用 "
+                "complete_persona_work 提交结果。"
+                if pending_work
                 else ""
             )
         )
@@ -231,7 +243,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
             return None
         session_id = str(kwargs.get("session_id", "")).strip()
         context = self._session_context.get(session_id, {})
-        user_id = str(context.get("user_id", "")).strip()
+        user_id = str(context.get("user_id", "")).strip() or self._require_store().latest_user_id(session_id)
         items = [
             item
             for item in kwargs["items"]
@@ -1151,13 +1163,19 @@ class MaiPersonaPlugin(MaiBotPlugin):
             for item in state["event_lines"]
             if float(item.get("talkable", 0.0)) >= self.config.event_lines.talkable_threshold
         ]
-        text = f"[角色此刻] 正在做：{activity}"
+        text = (
+            "[Mai Persona 当前状态，仅作为本轮表达倾向参考]\n"
+            f"心境：{state['mood_label']}，PAD={json.dumps(state['mood'], ensure_ascii=False, separators=(',', ':'))}；"
+            f"即时情绪：{state['emotion_label']}，PAD={json.dumps(state['emotion'], ensure_ascii=False, separators=(',', ':'))}；"
+            f"对外表达：PAD={json.dumps(state['expression'], ensure_ascii=False, separators=(',', ':'))}。"
+            f"\n表达提示：{state['style_hint']}。"
+            f"\n当前活动：{activity}"
+        )
         if lines:
             text += f"（事件线：{'、'.join(lines[:2])}）"
-        text += f"。心情：{state['mood_label']}。"
         relation = state["relationship"]
         if relation:
-            text += f"对你：{relation['stage']}"
+            text += f"\n当前用户关系：{relation['stage']}"
             affection = state["affection"] or {}
             tendencies = []
             for key, label in (("trust", "信任"), ("intimacy", "亲密"), ("rapport", "默契")):
@@ -1167,13 +1185,15 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 elif value <= -0.2:
                     tendencies.append(f"{label}偏谨慎")
             if tendencies:
-                text += f"，{'、'.join(tendencies)}"
-            text += "。"
+                text += f"；{'、'.join(tendencies)}"
         todos = state["todos"]
         if todos:
-            text += f"惦记着你说的「{todos[0]['content']}」。"
-        text += f"[表达提示] {state['style_hint']}"
-        return text[:200]
+            text += f"\n近期待办线索：惦记着用户提到的「{todos[0]['content']}」。"
+        text += (
+            "\n这些状态不覆盖 MaiBot 自有人格、行为准则、回复风格或用户本轮明确任务；"
+            "只用于让表达与角色当前状态保持一致。"
+        )
+        return text[:1200]
 
     @staticmethod
     def _extract_message_context(
@@ -1209,6 +1229,13 @@ class MaiPersonaPlugin(MaiBotPlugin):
         message_id: str,
     ) -> int:
         store = self._require_store()
+        existing = None
+        if message_id:
+            existing = store.fetchone(
+                "SELECT id FROM interaction_queue WHERE stream_id=? AND message_id=? AND role='user'",
+                (stream_id, message_id),
+            )
+        is_new_interaction = existing is None
         interaction_id = store.add_interaction(
             timestamp,
             user_id,
@@ -1227,18 +1254,87 @@ class MaiPersonaPlugin(MaiBotPlugin):
         if session_id:
             self._session_context[session_id] = {"user_id": user_id, "stream_id": stream_id}
         if (
-            interaction_id
+            is_new_interaction
+            and interaction_id
             and has_explicit_emotion(text)
             and interaction_id not in self._empathy_inflight
         ):
-            row = store.fetchone("SELECT evaluated FROM interaction_queue WHERE id=?", (interaction_id,))
-            if row and not bool(row["evaluated"]):
-                self._empathy_inflight.add(interaction_id)
-                self._spawn_task(
-                    self._evaluate_immediate_empathy(interaction_id, user_id, text),
-                    "persona-immediate-empathy",
-                )
+            if self._apply_immediate_emotion_seed(text, timestamp):
+                store.mark_interactions_evaluated([interaction_id])
+            else:
+                row = store.fetchone("SELECT evaluated FROM interaction_queue WHERE id=?", (interaction_id,))
+                if row and not bool(row["evaluated"]):
+                    self._empathy_inflight.add(interaction_id)
+                    self._spawn_task(
+                        self._evaluate_immediate_empathy(interaction_id, user_id, text),
+                        "persona-immediate-empathy",
+                    )
+        elif is_new_interaction and interaction_id:
+            self._apply_interaction_pulse(text, timestamp)
         return interaction_id
+
+    def _apply_immediate_emotion_seed(self, text: str, timestamp: float) -> bool:
+        """先把明确情绪变成小幅即时状态，避免必须等待 Planner 才首次变化。"""
+
+        delta = explicit_emotion_delta(text, min(self.config.emotion.max_delta_per_event, 0.16))
+        if not any((delta.p, delta.a, delta.d)):
+            return False
+        store = self._require_store()
+        current = store.emotion() or {}
+        mood = PAD(
+            float(current.get("mood_p", 0.0)),
+            float(current.get("mood_a", 0.0)),
+            float(current.get("mood_d", 0.0)),
+        )
+        emotion = PAD(
+            float(current.get("emo_p", 0.0)) + delta.p,
+            float(current.get("emo_a", 0.0)) + delta.a,
+            float(current.get("emo_d", 0.0)) + delta.d,
+        ).bounded()
+        store.apply_emotion(
+            now=timestamp,
+            source="empathy",
+            event_desc=f"用户明确表达情绪：{text[:1000]}",
+            appraisal="根据用户当前明确情绪表达产生即时共情反应；不据此改变关系阶段。",
+            facts_refs=[text[:500]],
+            delta=delta,
+            layer="emotion",
+            label=emotion_label(emotion),
+            mood_label=emotion_label(mood),
+            emotion_label=emotion_label(emotion),
+        )
+        return True
+
+    def _apply_interaction_pulse(self, text: str, timestamp: float) -> None:
+        """记录普通新互动带来的轻微即时唤醒，不改变关系或长期心境。"""
+
+        delta = interaction_pulse_delta(text)
+        if not any((delta.p, delta.a, delta.d)):
+            return
+        store = self._require_store()
+        current = store.emotion() or {}
+        mood = PAD(
+            float(current.get("mood_p", 0.0)),
+            float(current.get("mood_a", 0.0)),
+            float(current.get("mood_d", 0.0)),
+        )
+        emotion = PAD(
+            float(current.get("emo_p", 0.0)) + delta.p,
+            float(current.get("emo_a", 0.0)) + delta.a,
+            float(current.get("emo_d", 0.0)) + delta.d,
+        ).bounded()
+        store.apply_emotion(
+            now=timestamp,
+            source="interaction",
+            event_desc="收到一条新的用户互动",
+            appraisal="普通互动产生轻微即时唤醒；不据此改变关系阶段或长期心境。",
+            facts_refs=[],
+            delta=delta,
+            layer="emotion",
+            label=emotion_label(emotion),
+            mood_label=emotion_label(mood),
+            emotion_label=emotion_label(emotion),
+        )
 
     async def _sync_hook_message(self, session_id: str, message_id: str) -> None:
         if not session_id or not message_id or not self._active():
@@ -1321,6 +1417,8 @@ class MaiPersonaPlugin(MaiBotPlugin):
         session_id = str(kwargs.get("session_id", "")).strip()
         await self._sync_hook_message(session_id, str(kwargs.get("reply_message_id", "")).strip())
         user_id = self._session_context.get(session_id, {}).get("user_id", "")
+        if not user_id:
+            user_id = self._require_store().latest_user_id(session_id)
         modifier = self._state_modifier(self._now(), user_id)
         modified = dict(kwargs)
         original = str(modified.get("extra_prompt", "") or "").strip()

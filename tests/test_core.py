@@ -25,7 +25,14 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 from mai_persona.config import MaiPersonaConfig
 from mai_persona.engine_affection import apply_changes
 from mai_persona.engine_diary import validate_diary
-from mai_persona.engine_emotion import PAD, decay, has_explicit_emotion, regulated_expression
+from mai_persona.engine_emotion import (
+    PAD,
+    decay,
+    explicit_emotion_delta,
+    has_explicit_emotion,
+    interaction_pulse_delta,
+    regulated_expression,
+)
 from mai_persona.engine_life import validate_life_result
 from mai_persona.engine_relationship import validate_transition
 from mai_persona.engine_schedule import hard_guard
@@ -48,6 +55,18 @@ class EmotionTests(unittest.TestCase):
         self.assertTrue(has_explicit_emotion("我今天真的很焦虑"))
         self.assertTrue(has_explicit_emotion("这件事让我很开心"))
         self.assertFalse(has_explicit_emotion("我今天下班后去买菜"))
+
+    def test_explicit_emotion_delta_is_small_and_directional(self) -> None:
+        positive = explicit_emotion_delta("我今天很开心")
+        negative = explicit_emotion_delta("我现在很焦虑")
+        self.assertGreater(positive.p, 0)
+        self.assertGreater(positive.a, 0)
+        self.assertLess(negative.p, 0)
+        self.assertGreater(negative.a, 0)
+        self.assertLessEqual(max(abs(positive.p), abs(positive.a), abs(positive.d)), 0.16)
+        pulse = interaction_pulse_delta("普通的一条消息")
+        self.assertGreater(pulse.a, 0)
+        self.assertLessEqual(max(abs(pulse.p), abs(pulse.a), abs(pulse.d)), 0.04)
 
 
 class DomainTests(unittest.TestCase):
@@ -216,6 +235,7 @@ class StorageTests(unittest.TestCase):
             now = datetime(2026, 10, 30, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
             try:
                 store.initialize_emotion(PAD(0.2, 0.1, -0.1), now.timestamp())
+                self.assertEqual(store.emotion()["mood_label"], "轻松")
                 store.update_relationship("user-1", "朋友", "备注", now.timestamp())
                 store.add_affection("user-1", (0.2, 0.1, -0.1), "依据", ["事实"], now.timestamp())
                 store.add_todo("user-1", "待办内容", "", None, now.timestamp())
@@ -282,6 +302,7 @@ class StorageTests(unittest.TestCase):
                     )["n"],
                     1,
                 )
+                self.assertEqual(store.latest_user_id("stream-1"), "user-1")
                 first_id, first_inserted = store.insert_diary("2026-10-30", "日记", 1002)
                 second_id, second_inserted = store.insert_diary("2026-10-30", "重复", 1003)
                 self.assertEqual(first_id, second_id)
@@ -557,6 +578,54 @@ class PluginContractTests(unittest.TestCase):
                     self.assertEqual(planner_tasks[0]["work_id"], work_id)
                     self.assertIn("测试角色", planner_tasks[0]["instruction"])
                     self.assertIn("严格 JSON", planner_tasks[0]["instruction"])
+                    plugin._store.initialize_emotion(PAD(0.0, 0.0, 0.0), 1000)
+                    plugin._store.update_relationship("user-1", "熟悉", "", 1000)
+                    plugin._record_user_message(
+                        user_id="user-1",
+                        session_id="stream-1",
+                        stream_id="stream-1",
+                        text="我今天很开心",
+                        timestamp=1001,
+                        message_id="message-1",
+                    )
+                    emotion = plugin._store.emotion()
+                    self.assertGreater(emotion["emo_p"], 0)
+                    self.assertEqual(
+                        plugin._store.fetchone(
+                            "SELECT evaluated FROM interaction_queue WHERE message_id='message-1'"
+                        )["evaluated"],
+                        1,
+                    )
+                    modifier = plugin._state_modifier(
+                        datetime(2026, 10, 30, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+                        "user-1",
+                    )
+                    self.assertIn("即时情绪", modifier)
+                    self.assertIn("PAD=", modifier)
+                    self.assertGreater(len(modifier), 200)
+                    reply_hook = asyncio.run(
+                        plugin.handle_replyer_before_request(
+                            session_id="stream-1",
+                            reply_message_id="",
+                            extra_prompt="原有要求",
+                        )
+                    )
+                    self.assertIn("即时情绪", reply_hook["modified_kwargs"]["extra_prompt"])
+                    planner_hook = asyncio.run(
+                        plugin.handle_planner_before_request(
+                            items=[
+                                {
+                                    "item_type": "SystemMessageItem",
+                                    "meta": {"item_id": "system"},
+                                    "parts": [{"type": "text", "text": "MaiBot 原生人格"}],
+                                }
+                            ],
+                            session_id="stream-1",
+                        )
+                    )
+                    planner_text = json.dumps(planner_hook["modified_kwargs"]["items"], ensure_ascii=False)
+                    self.assertIn("当前状态", planner_text)
+                    self.assertIn("即时情绪", planner_text)
                 finally:
                     plugin._store.close()
                     plugin._store = None
