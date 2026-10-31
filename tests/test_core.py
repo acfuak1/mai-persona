@@ -734,6 +734,78 @@ class PluginContractTests(unittest.TestCase):
         finally:
             sys.modules.pop(module_name, None)
 
+    def test_planner_hook_never_adds_second_system_message(self) -> None:
+        module_name = "mai_persona_planner_system_merge_test"
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            PLUGIN_ROOT / "plugin.py",
+            submodule_search_locations=[str(PLUGIN_ROOT)],
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            plugin = module.create_plugin()
+            plugin.set_plugin_config({"plugin": {"enabled": True, "config_version": "1.0.0"}})
+            plugin._store = object()
+            plugin._planner_context = lambda now, user_id: "[Mai Persona 角色设定] 测试角色"
+            plugin._session_context["stream-1"] = {"user_id": "user-1", "stream_id": "stream-1"}
+
+            merged_result = asyncio.run(
+                plugin.handle_planner_before_request(
+                    items=[
+                        {
+                            "item_type": "SystemMessageItem",
+                            "meta": {"item_id": "system"},
+                            "parts": [{"type": "text", "text": "MaiBot 原生人格"}],
+                        },
+                        {
+                            "item_type": "UserMessageItem",
+                            "meta": {"item_id": "user"},
+                            "parts": [{"type": "text", "text": "你好"}],
+                        },
+                        {
+                            "item_type": "SystemMessageItem",
+                            "meta": {"item_id": "mai-persona:legacy"},
+                            "parts": [{"type": "text", "text": "旧注入"}],
+                        },
+                    ],
+                    session_id="stream-1",
+                )
+            )
+            items = merged_result["modified_kwargs"]["items"]
+            system_items = [item for item in items if item["item_type"] == "SystemMessageItem"]
+            self.assertEqual(len(system_items), 1)
+            self.assertEqual(items[0]["meta"]["item_id"], "system")
+            merged = "".join(part["text"] for part in items[0]["parts"])
+            self.assertIn("MaiBot 原生人格", merged)
+            self.assertIn("[Mai Persona 角色设定] 测试角色", merged)
+            self.assertNotIn("旧注入", merged)
+            self.assertFalse(
+                any(str(item["meta"].get("item_id", "")).startswith("mai-persona:") for item in items)
+            )
+
+            inserted_result = asyncio.run(
+                plugin.handle_planner_before_request(
+                    items=[
+                        {
+                            "item_type": "UserMessageItem",
+                            "meta": {"item_id": "user-only"},
+                            "parts": [{"type": "text", "text": "只有用户消息"}],
+                        }
+                    ],
+                    session_id="stream-1",
+                )
+            )
+            inserted = inserted_result["modified_kwargs"]["items"]
+            self.assertEqual(inserted[0]["item_type"], "SystemMessageItem")
+            self.assertEqual(inserted[0]["parts"][0]["text"], "[Mai Persona 角色设定] 测试角色")
+            self.assertEqual(inserted[1]["meta"]["item_id"], "user-only")
+        finally:
+            sys.modules.pop(module_name, None)
+
     def test_maitrace_schedule_uses_public_plugin_api(self) -> None:
         module_name = "mai_persona_maitrace_api_test"
         spec = importlib.util.spec_from_file_location(

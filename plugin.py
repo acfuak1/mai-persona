@@ -287,17 +287,39 @@ class MaiPersonaPlugin(MaiBotPlugin):
             )
         ]
         now = self._now()
-        persona_item = {
-            "item_type": "SystemMessageItem",
-            "meta": {
-                "item_id": f"mai-persona:{uuid4().hex}",
-                "logical_turn_id": None,
-                "timestamp": now.isoformat(),
-            },
-            "parts": [{"type": "text", "text": self._planner_context(now, user_id)}],
-        }
-        insert_at = 1 if items and isinstance(items[0], dict) and items[0].get("item_type") == "SystemMessageItem" else 0
-        items.insert(insert_at, persona_item)
+        persona_text = self._planner_context(now, user_id)
+        system_index = next(
+            (
+                index
+                for index, item in enumerate(items)
+                if isinstance(item, dict) and item.get("item_type") == "SystemMessageItem"
+            ),
+            None,
+        )
+        if system_index is None:
+            items.insert(
+                0,
+                {
+                    "item_type": "SystemMessageItem",
+                    "meta": {
+                        "item_id": f"mai-persona:{uuid4().hex}",
+                        "logical_turn_id": None,
+                        "timestamp": now.isoformat(),
+                    },
+                    "parts": [{"type": "text", "text": persona_text}],
+                },
+            )
+        else:
+            # 该 Hook 也会在工具结果整理等子代理请求上触发，宿主又不提供 request_kind。
+            # 百炼 Qwen 系模板只允许 system 出现在第 0 条，新增第二条会 400
+            # "System message must be at the beginning."，因此并进已有 system 文本。
+            system_item = dict(items[system_index])
+            existing_parts = system_item.get("parts")
+            system_item["parts"] = [
+                *(existing_parts if isinstance(existing_parts, list) else []),
+                {"type": "text", "text": f"\n\n{persona_text}"},
+            ]
+            items[system_index] = system_item
         modified = dict(kwargs)
         modified["items"] = items
         return {"action": "continue", "modified_kwargs": modified}
