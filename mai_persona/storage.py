@@ -627,7 +627,14 @@ class PersonaStore:
         kind: str,
         now: float,
         limit: int = 3,
+        user_id: str = "",
     ) -> list[dict[str, Any]]:
+        if user_id:
+            return self.fetchall(
+                "SELECT * FROM relationship_events WHERE kind=? AND user_id=? AND status='pending' "
+                "AND (due_at IS NULL OR due_at<=?) ORDER BY COALESCE(due_at, created_at) LIMIT ?",
+                (kind, user_id, now, max(1, min(int(limit), 20))),
+            )
         return self.fetchall(
             "SELECT * FROM relationship_events WHERE kind=? AND status='pending' "
             "AND (due_at IS NULL OR due_at<=?) ORDER BY COALESCE(due_at, created_at) LIMIT ?",

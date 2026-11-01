@@ -244,6 +244,30 @@ class AffectionConfig(PluginConfigBase):
         step=1,
         group="关系评估",
     )
+    cooldown_enabled: bool = _ui_field(
+        "长期不来往时关系缓慢冷却",
+        "超过指定天数没有互动时，好感每天向 0 轻微回落；已知缺席期间不冷却。",
+        default=True,
+        group="关系冷却",
+    )
+    cooldown_after_days: float = _ui_field(
+        "多久不联系开始冷却（天）",
+        "超过这个天数没有互动才进入冷却。",
+        default=14.0,
+        ge=1.0,
+        le=365.0,
+        step=1.0,
+        group="关系冷却",
+    )
+    cooldown_rate_per_day: float = _ui_field(
+        "每天冷却比例",
+        "每天向 0 收缩的比例，例如 0.01 表示每天减少当前值的 1%。",
+        default=0.01,
+        ge=0.0,
+        le=0.2,
+        step=0.005,
+        group="关系冷却",
+    )
 
     @field_validator("evaluate_daily_at")
     @classmethod

@@ -33,6 +33,10 @@ max_micro_event_bias = 0.15
 evaluate_daily_at = "23:00"
 max_delta = 0.1
 evidence_hours = 24.0
+# 长期不来往时关系缓慢冷却（已知缺席期间不冷却）
+cooldown_enabled = true
+cooldown_after_days = 14.0
+cooldown_rate_per_day = 0.01
 
 [event_lines]
 max_active = 3

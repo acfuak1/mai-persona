@@ -35,6 +35,7 @@ _NEGATION_PREFIXES = ("不是不想", "没有不想", "并不是不想")
 
 _PEAK_MARKERS = ("太开心", "超级开心", "兴奋", "太棒了", "考过了", "通过了", "拿到了", "成功了")
 _PEAK_NEGATIONS = ("没通过", "没拿到", "失败了", "没成功", "没过")
+_PEAK_CONDITIONALS = ("如果", "要是", "假如", "下次", "以后", "等我", "要是能", "等考完")
 
 _DISCLOSURE_HINTS = {
     0: "披露深度：表层。只聊日常与公共话题，不主动提自己的经历或感受。",
@@ -156,6 +157,8 @@ def detect_peak(text: Any) -> bool:
         return False
     if any(marker in value for marker in _PEAK_NEGATIONS):
         return False
+    if any(marker in value for marker in _PEAK_CONDITIONALS):
+        return False
     return any(marker in value for marker in _PEAK_MARKERS)
 
 
@@ -235,8 +238,14 @@ def estimate_absence(text: Any) -> tuple[float, float] | None:
 
 _SEVERE_FRICTION = ("闭嘴", "有毛病", "滚", "失望透顶", "不想理你")
 _MEDIUM_FRICTION = ("你根本", "烦死了", "别理我", "敷衍")
-_PERSONAL_MARKERS = ("我", "我的", "最近", "今天", "昨天", "明天", "其实", "觉得")
-_VENTING_MARKERS = ("难受", "烦", "累", "崩溃", "压力", "委屈", "想哭", "撑不住", "没意思")
+_PERSONAL_MARKERS = (
+    "我的", "我最近", "我今天", "我昨天", "我想", "我打算", "我觉得",
+    "其实我", "说实话", "我发现", "我遇到", "我希望",
+)
+_VENTING_MARKERS = (
+    "难受", "很烦", "好烦", "烦躁", "好累", "太累", "心累",
+    "崩溃", "压力", "委屈", "想哭", "撑不住", "没意思",
+)
 
 
 def friction_severity(text: Any) -> float:

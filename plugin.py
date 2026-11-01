@@ -37,11 +37,11 @@ from .mai_persona.engine_emotion import (
 )
 from .mai_persona.engine_events import apply_advances
 from .mai_persona.engine_humanlike import (
-    carry_over_scale,
     closeness,
     detect_boundary,
     detect_friction,
     detect_peak,
+    disclosure_hint,
     drain_energy,
     detect_venting,
     estimate_absence,
@@ -269,7 +269,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 )
                 + "。请在本轮 Planner 中优先读取并完成这些任务；维护过程不要作为话题告诉用户。"
             )
-        followups = store.pending_relationship_events("followup", now.timestamp(), limit=2)
+        followups = store.pending_relationship_events("followup", now.timestamp(), limit=2, user_id=user_id)
         if followups:
             pending_summary += (
                 "\n待跟进事项："
@@ -277,7 +277,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
                     f"#{int(item['id'])}（{str(item['summary'])[:80]}）" for item in followups
                 )
             )
-        repairs = store.pending_relationship_events("repair", now.timestamp(), limit=1)
+        repairs = store.pending_relationship_events("repair", now.timestamp(), limit=1, user_id=user_id)
         if repairs:
             pending_summary += (
                 "\n未化解的摩擦：用户说过「"
@@ -757,10 +757,9 @@ class MaiPersonaPlugin(MaiBotPlugin):
         self._maybe_refresh_maitrace_schedule(now)
         store = self._require_store()
         emotion_cfg = self.config.emotion
-        carry_until = float(store.get_meta("carry_over_until", "0") or 0.0)
         state = store.decay_emotion(
             now.timestamp(),
-            emotion_cfg.tau_emotion_min * 60 * carry_over_scale(now.timestamp(), carry_until),
+            emotion_cfg.tau_emotion_min * 60,
             emotion_cfg.tau_mood_hours * 3600,
         )
         if state:
@@ -1207,8 +1206,44 @@ class MaiPersonaPlugin(MaiBotPlugin):
     async def _run_daily_jobs(self, now: datetime) -> None:
         await self._run_affection_job(now)
         await self._run_followup_job(now)
+        self._cool_affection(now)
         await self._advance_event_lines_if_due(now)
         await self._generate_diary_if_due(now)
+
+    def _cool_affection(self, now: datetime) -> None:
+        """长期不来往时让好感缓慢向 0 回落；已知缺席期间不冷却。"""
+
+        config = self.config.affection
+        if not config.cooldown_enabled or config.cooldown_rate_per_day <= 0:
+            return
+        store = self._require_store()
+        day = now.date().isoformat()
+        for row in store.users_last_interaction(limit=20):
+            user_id = str(row["user_id"])
+            if now.timestamp() - float(row["last"]) < config.cooldown_after_days * 86400:
+                continue
+            if store.upcoming_absence(user_id, now.timestamp()) is not None:
+                continue
+            cooled_key = f"affection_cooled:{user_id}:{day}"
+            if store.get_meta(cooled_key):
+                continue
+            affection = store.affection(user_id)
+            if not affection:
+                continue
+            deltas = tuple(
+                -float(affection.get(name, 0.0) or 0.0) * config.cooldown_rate_per_day
+                for name in ("trust", "intimacy", "rapport")
+            )
+            if not any(abs(value) >= 0.0005 for value in deltas):
+                continue
+            store.set_meta(cooled_key, "1")
+            store.add_affection(
+                user_id,
+                deltas,
+                "长期没有互动，关系缓慢冷却",
+                ["长期没有互动"],
+                now.timestamp(),
+            )
 
     async def _run_followup_job(self, now: datetime) -> None:
         config = self.config.humanlike
@@ -1691,9 +1726,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
         ]
         text = (
             "[Mai Persona 当前状态，仅作为本轮表达倾向参考]\n"
-            f"心境：{state['mood_label']}，PAD={json.dumps(state['mood'], ensure_ascii=False, separators=(',', ':'))}；"
-            f"即时情绪：{state['emotion_label']}，PAD={json.dumps(state['emotion'], ensure_ascii=False, separators=(',', ':'))}；"
-            f"对外表达：PAD={json.dumps(state['expression'], ensure_ascii=False, separators=(',', ':'))}。"
+            f"心境：{state['mood_label']}；即时情绪：{state['emotion_label']}。"
             f"\n表达状态：{state['style_hint']}。"
             f"\n当前活动：{activity}"
         )
@@ -1726,6 +1759,10 @@ class MaiPersonaPlugin(MaiBotPlugin):
             if relation_stage in stages:
                 position = stages.index(relation_stage) + 1
                 text += f"\n关系阶段：{relation_stage}（第 {position}/{len(stages)} 阶段）"
+                if self.config.persona.disclosure_depth_gating:
+                    depth_hint = disclosure_hint(position - 1)
+                    if depth_hint:
+                        text += f"\n（设定：{depth_hint}）"
             else:
                 text += f"\n关系阶段：{relation_stage}"
         store = self._require_store()
@@ -1742,7 +1779,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 return "不久前"
             return f"{days} 天前"
 
-        repairs = store.pending_relationship_events("repair", now.timestamp(), limit=1)
+        repairs = store.pending_relationship_events("repair", now.timestamp(), limit=1, user_id=user_id)
         if repairs:
             severity = float(repairs[0].get("severity", 0.5) or 0.5)
             suffix = "（语气比较重）" if severity >= 0.7 else ""
@@ -1803,11 +1840,15 @@ class MaiPersonaPlugin(MaiBotPlugin):
             for item in visible_boundaries:
                 store.mark_boundary_noted(int(item["id"]), now.timestamp())
         last_text = str(context.get("last_user_text", ""))
-        followups = store.pending_relationship_events("followup", now.timestamp(), limit=1)
+        followups = store.pending_relationship_events("followup", now.timestamp(), limit=1, user_id=user_id)
         # 对方正在情绪里或有未化解摩擦时，不把"关心一句"塞进这一轮
-        carry_until = float(store.get_meta("carry_over_until", "0") or 0.0)
+        carry_until = float(store.get_meta(f"carry_over_until:{user_id}", "0") or 0.0)
         emotional_block = bool(repairs) or carry_until > now.timestamp()
-        if followups and not emotional_block:
+        followup_relevant = bool(followups) and (
+            shares_topic(str(followups[0]["summary"]), last_text)
+            or len(last_text.strip()) <= 6
+        )
+        if followups and not emotional_block and followup_relevant:
             add_hint(
                 4,
                 "followup",
@@ -1907,6 +1948,12 @@ class MaiPersonaPlugin(MaiBotPlugin):
         if self.config.humanlike.milestone_enabled and milestone > 0:
             add_hint(12, "milestone", f"你们认识已经 {milestone} 天了。")
             store.set_meta(f"milestone_pending:{user_id}", 0)
+        # 群聊里只保留修复提示，避免把两个人的私事暴露在公开场合
+        session_private = True
+        if session_id:
+            session_private = bool(self._session_context.get(session_id, {}).get("is_private", True))
+        if not session_private:
+            hints = [item for item in hints if item.get("kind") == "repair"]
         # 先截断基础状态（按整行切），保证提示不会被 1600 字上限吃掉
         text = text[:1200].rsplit("\n", 1)[0]
         if hints:
@@ -2144,6 +2191,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
         if (
             is_new_interaction
             and interaction_id
+            and is_private
             and has_explicit_emotion(text)
             and interaction_id not in self._empathy_inflight
         ):
@@ -2157,7 +2205,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
                         self._evaluate_immediate_empathy(interaction_id, user_id, text),
                         "persona-immediate-empathy",
                     )
-        elif is_new_interaction and interaction_id:
+        elif is_new_interaction and interaction_id and is_private:
             self._apply_interaction_pulse(user_id, text, timestamp)
         if is_new_interaction:
             self._track_relationship_events(user_id, stream_id, text, timestamp)
@@ -2179,7 +2227,10 @@ class MaiPersonaPlugin(MaiBotPlugin):
         store = self._require_store()
         delta = explicit_emotion_delta(text, self.config.emotion.max_delta_per_event)
         if (delta.p < 0 or delta.a > 0 and delta.p <= 0) and config.emotion_carry_over_hours > 0:
-            store.set_meta("carry_over_until", timestamp + config.emotion_carry_over_hours * 3600)
+            store.set_meta(
+                f"carry_over_until:{user_id}",
+                timestamp + config.emotion_carry_over_hours * 3600,
+            )
         friction = detect_friction(text)
         severity = friction_severity(text) if friction else 0.0
         if config.repair_enabled and friction:
@@ -2198,7 +2249,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
             bump = scale_by_closeness(base, self._closeness_for(user_id))
             store.bump_grudge(user_id, bump, text[:120], timestamp, config.grudge_cap)
         if config.repair_escalation and delta.p < 0:
-            pending = store.pending_relationship_events("repair", timestamp, limit=1)
+            pending = store.pending_relationship_events("repair", timestamp, limit=1, user_id=user_id)
             if pending and int(pending[0].get("attempts", 0) or 0) < 3:
                 store.bump_repair_attempt(int(pending[0]["id"]), timestamp)
                 if config.grudge_enabled:
@@ -2301,7 +2352,8 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 )
                 self.ctx.logger.info("按时间词记录计划缺席（Planner 兜底）：%s", user_id)
         # 私聊消耗更明显；群聊只做轻微消耗，避免群聊把私聊用户一起拖冷
-        self._drain_energy(0.008 if is_private else 0.003)
+        if is_private:
+            self._drain_energy(0.008)
 
         absence = store.current_absence(user_id, timestamp)
         if absence is not None:
@@ -2580,6 +2632,10 @@ class MaiPersonaPlugin(MaiBotPlugin):
             for item in pending_hints:
                 match = str(item.get("match", "") or "")
                 if not match or not shares_topic(match, response):
+                    continue
+                # 回复把提示语原样复述出来不算"采用"，那正是要避免的
+                hint_text = str(item.get("text", ""))[:8]
+                if hint_text and hint_text in response:
                     continue
                 store.record_hint(str(item.get("kind", "unknown")), day, used=True)
                 peak_id = item.get("peak_id")

@@ -129,6 +129,28 @@ def normalize_delta(raw: Any, limit: float) -> PAD:
     return PAD(value("p"), value("a"), value("d"))
 
 
+_NEGATION_PREFIXES = ("不开心", "不高兴", "不快乐", "不兴奋", "不期待", "不太开心", "并不开心", "没开心", "没有开心")
+
+
+def _has_marker(text: str, markers: tuple[str, ...]) -> bool:
+    """匹配情绪词，但排除被否定词吞掉的情况（"不开心"不算开心）。"""
+
+    for marker in markers:
+        start = 0
+        while True:
+            index = text.find(marker, start)
+            if index < 0:
+                break
+            prefix = text[max(0, index - 3) : index]
+            negated = any(
+                prefix.endswith(word) for word in ("不", "没", "别", "未", "无", "并不", "不太", "不太")
+            )
+            if not negated:
+                return True
+            start = index + len(marker)
+    return False
+
+
 def explicit_emotion_delta(text: str, limit: float = 0.16) -> PAD:
     """把明确情绪词转换为小幅即时共情变化，避免状态必须等待 Planner 才首次变化。"""
 
@@ -136,13 +158,16 @@ def explicit_emotion_delta(text: str, limit: float = 0.16) -> PAD:
     magnitude = max(0.0, min(0.2, float(limit)))
     if not normalized or magnitude <= 0:
         return PAD(0.0, 0.0, 0.0)
-    if any(marker in normalized for marker in _POSITIVE_EMOTION_MARKERS):
+    # 否定式正向表达按负面处理（"不开心""不高兴"）
+    if any(pattern in normalized for pattern in _NEGATION_PREFIXES):
+        return PAD(-magnitude, magnitude * 0.5, -magnitude * 0.2)
+    if _has_marker(normalized, _POSITIVE_EMOTION_MARKERS):
         return PAD(magnitude, magnitude * 0.65, magnitude * 0.25)
-    if any(marker in normalized for marker in _HIGH_AROUSAL_NEGATIVE_MARKERS):
+    if _has_marker(normalized, _HIGH_AROUSAL_NEGATIVE_MARKERS):
         return PAD(-magnitude, magnitude * 0.8, -magnitude * 0.25)
-    if any(marker in normalized for marker in _FATIGUE_MARKERS):
+    if _has_marker(normalized, _FATIGUE_MARKERS):
         return PAD(-magnitude * 0.7, -magnitude * 0.65, -magnitude * 0.2)
-    if any(marker in normalized for marker in _LOW_AROUSAL_NEGATIVE_MARKERS):
+    if _has_marker(normalized, _LOW_AROUSAL_NEGATIVE_MARKERS):
         return PAD(-magnitude, -magnitude * 0.55, -magnitude * 0.2)
     return PAD(0.0, 0.0, 0.0)
 
