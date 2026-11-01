@@ -70,16 +70,6 @@ def detect_friction(text: Any) -> bool:
     return any(marker in value for marker in _FRICTION_MARKERS)
 
 
-def carry_over_scale(now: float, until: float, factor: float = 2.5) -> float:
-    """情绪残留期间放大回归时间常数，让情绪多停留一会儿。"""
-
-    try:
-        active = float(until or 0.0) > float(now)
-    except (TypeError, ValueError):
-        return 1.0
-    return float(factor) if active else 1.0
-
-
 def closeness(stage: Any, stages: list[str], affection: dict[str, Any] | None) -> float:
     """把关系阶段与三维好感合成为一个 0~1 的亲密度，用于缩放所有拟人效果。"""
 
@@ -200,6 +190,34 @@ _COMMON_BIGRAMS = {
     "但是", "因为", "所以", "然后", "时候", "知道", "觉得", "真的", "有点",
     "一下", "已经", "不是", "就是",
 }
+
+
+def looks_like_echo(hint: Any, response: Any, min_chars: int = 8) -> bool:
+    """判断回复是否在复述提示语本身，而不是自然用到其中的信息。"""
+
+    hint_text = str(hint or "")
+    reply = str(response or "")
+    if not hint_text or not reply:
+        return False
+    for quoted in re.findall(r"[「『\"]([^」』\"]{2,})[」』\"]", hint_text):
+        if quoted in reply:
+            return True
+    if len(hint_text) > 200 or len(reply) > 600:
+        return False
+    previous = [0] * (len(reply) + 1)
+    best = 0
+    for char in hint_text:
+        current = [0]
+        for index, other in enumerate(reply, 1):
+            if char == other:
+                value = previous[index - 1] + 1
+                if value > best:
+                    best = value
+                current.append(value)
+            else:
+                current.append(0)
+        previous = current
+    return best >= min(min_chars, len(hint_text))
 
 
 def shares_topic(left: Any, right: Any, width: int = 2) -> bool:

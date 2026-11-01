@@ -629,16 +629,13 @@ class PersonaStore:
         limit: int = 3,
         user_id: str = "",
     ) -> list[dict[str, Any]]:
-        if user_id:
-            return self.fetchall(
-                "SELECT * FROM relationship_events WHERE kind=? AND user_id=? AND status='pending' "
-                "AND (due_at IS NULL OR due_at<=?) ORDER BY COALESCE(due_at, created_at) LIMIT ?",
-                (kind, user_id, now, max(1, min(int(limit), 20))),
-            )
+        if not user_id:
+            # 没有用户上下文时安全失败，避免把别人的事项注入给当前用户
+            return []
         return self.fetchall(
-            "SELECT * FROM relationship_events WHERE kind=? AND status='pending' "
+            "SELECT * FROM relationship_events WHERE kind=? AND user_id=? AND status='pending' "
             "AND (due_at IS NULL OR due_at<=?) ORDER BY COALESCE(due_at, created_at) LIMIT ?",
-            (kind, now, max(1, min(int(limit), 20))),
+            (kind, user_id, now, max(1, min(int(limit), 20))),
         )
 
     def resolve_relationship_event(self, event_id: int, now: float) -> bool:
@@ -1004,6 +1001,15 @@ class PersonaStore:
             "threads": count("SELECT COUNT(*) n FROM threads WHERE status='open'"),
             "rituals": count("SELECT COUNT(*) n FROM rituals"),
         }
+
+    def users_last_before(self, cutoff: float, limit: int = 200) -> list[dict[str, Any]]:
+        """取出最后互动时间早于 cutoff 的用户（用于关系冷却，不按最近互动截断）。"""
+
+        return self.fetchall(
+            "SELECT user_id, MAX(ts) AS last FROM interaction_queue WHERE role='user' "
+            "GROUP BY user_id HAVING MAX(ts) < ? ORDER BY last ASC LIMIT ?",
+            (cutoff, max(1, min(int(limit), 500))),
+        )
 
     def users_last_interaction(self, limit: int = 5) -> list[dict[str, Any]]:
         return self.fetchall(

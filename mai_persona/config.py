@@ -600,8 +600,8 @@ class HumanlikeConfig(PluginConfigBase):
         group="跟进",
     )
     emotion_carry_over_hours: float = _ui_field(
-        "情绪残留时长（小时）",
-        "用户明确表达负面情绪后，角色情绪在这段时间内回落得更慢，避免立刻恢复平静。",
+        "负面情绪后暂停跟进（小时）",
+        "用户明确表达负面情绪后，这段时间内不再给该用户插入“跟进/关心一句”的提示；不影响全局心境。",
         default=2.0,
         ge=0.0,
         le=24.0,

@@ -36,7 +36,6 @@ from mai_persona.engine_emotion import (
 from mai_persona.engine_life import validate_life_result
 from mai_persona.engine_relationship import validate_transition
 from mai_persona.engine_humanlike import (
-    carry_over_scale,
     closeness,
     detect_boundary,
     detect_friction,
@@ -49,6 +48,7 @@ from mai_persona.engine_humanlike import (
     friction_severity,
     grudge_decay,
     has_personal_marker,
+    looks_like_echo,
     milestone_days,
     recover_energy,
     scale_by_closeness,
@@ -125,9 +125,6 @@ class DomainTests(unittest.TestCase):
         self.assertIn("私密", disclosure_hint(2))
         self.assertTrue(detect_friction("你根本不想听我说话"))
         self.assertFalse(detect_friction("今天路上有点堵"))
-        self.assertEqual(carry_over_scale(1000, 2000), 2.5)
-        self.assertEqual(carry_over_scale(3000, 2000), 1.0)
-        self.assertEqual(carry_over_scale(3000, 0), 1.0)
 
     def test_closeness_scales_humanlike_effects(self) -> None:
         stages = ["陌生", "熟悉", "朋友", "亲密"]
@@ -184,6 +181,17 @@ class DomainTests(unittest.TestCase):
         self.assertTrue(detect_peak("我面试通过了"))
         self.assertFalse(has_personal_marker("我"))
         self.assertTrue(has_personal_marker("我最近在学吉他"))
+        self.assertLess(explicit_emotion_delta("我今天不怎么开心").p, 0)
+        self.assertLess(explicit_emotion_delta("我不是很开心").p, 0)
+        self.assertEqual(explicit_emotion_delta("我没有不开心").p, 0.0)
+        self.assertTrue(
+            looks_like_echo(
+                "上一轮用户说了「你根本不懂我」，这句话还没有被回应。", "你根本不懂我"
+            )
+        )
+        self.assertFalse(
+            looks_like_echo("3 天前用户提到：面试结果（尚未跟进）。", "面试结果出来了吗")
+        )
 
     def test_new_humanlike_helpers(self) -> None:
         self.assertEqual(friction_severity("闭嘴"), 0.85)
@@ -503,17 +511,18 @@ class StorageTests(unittest.TestCase):
                 first = store.add_relationship_event("followup", "u1", "周五面试结果", now=1000, due_at=2000)
                 again = store.add_relationship_event("followup", "u1", "周五面试结果", now=1001, due_at=2100)
                 self.assertEqual(first, again)
-                self.assertEqual(store.pending_relationship_events("followup", 1999), [])
-                self.assertEqual(len(store.pending_relationship_events("followup", 2000)), 1)
+                self.assertEqual(store.pending_relationship_events("followup", 1999, user_id="u1"), [])
+                self.assertEqual(len(store.pending_relationship_events("followup", 2000, user_id="u1")), 1)
                 self.assertTrue(store.resolve_relationship_event(first, 2100))
-                self.assertEqual(store.pending_relationship_events("followup", 3000), [])
+                self.assertEqual(store.pending_relationship_events("followup", 3000, user_id="u1"), [])
 
                 repair = store.add_relationship_event("repair", "u1", "摩擦", now=3000, due_at=3000)
                 self.assertEqual(store.resolve_user_events("repair", "u1", 3100), 1)
                 later = store.add_relationship_event("repair", "u1", "摩擦", now=4000, due_at=4000)
                 self.assertNotEqual(repair, later)
                 self.assertEqual(store.expire_relationship_events("repair", 4000 + 25 * 3600, 24), 1)
-                self.assertEqual(store.pending_relationship_events("repair", 4000 + 25 * 3600), [])
+                self.assertEqual(store.pending_relationship_events("repair", 4000 + 25 * 3600, user_id="u1"), [])
+                self.assertEqual(store.pending_relationship_events("followup", 3000), [])
             finally:
                 store.close()
 
@@ -1061,14 +1070,14 @@ class PluginContractTests(unittest.TestCase):
                         )
 
                     record("你根本不想听我说话", "m1", 0)
-                    repairs = store.pending_relationship_events("repair", now.timestamp())
+                    repairs = store.pending_relationship_events("repair", now.timestamp(), user_id="u1")
                     self.assertEqual(len(repairs), 1)
                     grudge_after = float(store.get_grudge("u1")["value"])
                     self.assertGreater(grudge_after, 0.0)
 
                     record("今天挺开心的", "m2", 30)
                     self.assertEqual(
-                        store.pending_relationship_events("repair", now.timestamp()), []
+                        store.pending_relationship_events("repair", now.timestamp(), user_id="u1"), []
                     )
                     self.assertLess(float(store.get_grudge("u1")["value"]), grudge_after)
 
@@ -1107,7 +1116,7 @@ class PluginContractTests(unittest.TestCase):
                     )
                     self.assertTrue(applied)
                     events = store.pending_relationship_events(
-                        "followup", now.timestamp() + 7 * 3600
+                        "followup", now.timestamp() + 7 * 3600, user_id="u1"
                     )
                     self.assertEqual([item["summary"] for item in events], ["周五面试结果"])
                     self.assertIn(
@@ -1318,6 +1327,65 @@ class PluginContractTests(unittest.TestCase):
                     )
                     plugin._cool_affection(now)
                     self.assertLess(store.affection("c")["trust"], 0.5)
+                finally:
+                    plugin._store = None
+                    store.close()
+        finally:
+            sys.modules.pop(module_name, None)
+
+    def test_affection_cooling_targets_old_users(self) -> None:
+        module_name = "mai_persona_cooling_test"
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            PLUGIN_ROOT / "plugin.py",
+            submodule_search_locations=[str(PLUGIN_ROOT)],
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            with tempfile.TemporaryDirectory() as temp:
+                plugin = module.create_plugin()
+                plugin.set_plugin_config(
+                    {"plugin": {"enabled": True, "config_version": "1.0.0"}}
+                )
+                plugin._set_context(
+                    types.SimpleNamespace(api=Mock(), logger=Mock(spec=logging.Logger))
+                )
+                store = PersonaStore(Path(temp) / "persona.db")
+                plugin._store = store
+                try:
+                    now = plugin._now()
+                    store.initialize_emotion(PAD(0.0, 0.0, 0.0), now.timestamp())
+                    old_ts = now.timestamp() - 40 * 86400
+                    for index in range(25):
+                        user = f"u{index:02d}"
+                        store.update_relationship(user, "朋友", "", now.timestamp())
+                        store.add_affection(
+                            user, (0.5, 0.5, 0.5), "测试", ["x"], now.timestamp()
+                        )
+                        store.add_interaction(
+                            old_ts + index, user, f"s{index}", "user", "很久没说话"
+                        )
+                    store.update_relationship("fresh", "朋友", "", now.timestamp())
+                    store.add_affection(
+                        "fresh", (0.5, 0.5, 0.5), "测试", ["x"], now.timestamp()
+                    )
+                    store.add_interaction(
+                        now.timestamp() - 60, "fresh", "sf", "user", "刚说话"
+                    )
+
+                    plugin._cool_affection(now)
+                    today = now.date().isoformat()
+                    self.assertEqual(store.get_meta("affection_cooled:u00"), today)
+                    self.assertLess(store.affection("u00")["trust"], 0.5)
+                    self.assertEqual(store.get_meta("affection_cooled:fresh"), "")
+
+                    trust_after = store.affection("u00")["trust"]
+                    plugin._cool_affection(now)
+                    self.assertAlmostEqual(store.affection("u00")["trust"], trust_after)
                 finally:
                     plugin._store = None
                     store.close()

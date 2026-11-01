@@ -48,6 +48,7 @@ from .mai_persona.engine_humanlike import (
     friction_severity,
     grudge_decay,
     has_personal_marker,
+    looks_like_echo,
     milestone_days,
     recover_energy,
     scale_by_closeness,
@@ -1211,32 +1212,31 @@ class MaiPersonaPlugin(MaiBotPlugin):
         await self._generate_diary_if_due(now)
 
     def _cool_affection(self, now: datetime) -> None:
-        """长期不来往时让好感缓慢向 0 回落；已知缺席期间不冷却。"""
+        """长期不来往时让正好感缓慢向 0 回落；已知缺席期间不冷却。"""
 
         config = self.config.affection
         if not config.cooldown_enabled or config.cooldown_rate_per_day <= 0:
             return
         store = self._require_store()
-        day = now.date().isoformat()
-        for row in store.users_last_interaction(limit=20):
+        today = now.date().isoformat()
+        cutoff = now.timestamp() - config.cooldown_after_days * 86400
+        for row in store.users_last_before(cutoff):
             user_id = str(row["user_id"])
-            if now.timestamp() - float(row["last"]) < config.cooldown_after_days * 86400:
-                continue
             if store.upcoming_absence(user_id, now.timestamp()) is not None:
                 continue
-            cooled_key = f"affection_cooled:{user_id}:{day}"
-            if store.get_meta(cooled_key):
+            cooled_key = f"affection_cooled:{user_id}"
+            if store.get_meta(cooled_key) == today:
                 continue
             affection = store.affection(user_id)
             if not affection:
                 continue
             deltas = tuple(
-                -float(affection.get(name, 0.0) or 0.0) * config.cooldown_rate_per_day
+                -max(0.0, float(affection.get(name, 0.0) or 0.0)) * config.cooldown_rate_per_day
                 for name in ("trust", "intimacy", "rapport")
             )
-            if not any(abs(value) >= 0.0005 for value in deltas):
+            if not any(value <= -0.0005 for value in deltas):
                 continue
-            store.set_meta(cooled_key, "1")
+            store.set_meta(cooled_key, today)
             store.add_affection(
                 user_id,
                 deltas,
@@ -2634,8 +2634,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 if not match or not shares_topic(match, response):
                     continue
                 # 回复把提示语原样复述出来不算"采用"，那正是要避免的
-                hint_text = str(item.get("text", ""))[:8]
-                if hint_text and hint_text in response:
+                if looks_like_echo(str(item.get("text", "")), response):
                     continue
                 store.record_hint(str(item.get("kind", "unknown")), day, used=True)
                 peak_id = item.get("peak_id")

@@ -129,7 +129,12 @@ def normalize_delta(raw: Any, limit: float) -> PAD:
     return PAD(value("p"), value("a"), value("d"))
 
 
-_NEGATION_PREFIXES = ("不开心", "不高兴", "不快乐", "不兴奋", "不期待", "不太开心", "并不开心", "没开心", "没有开心")
+_NEGATION_PREFIXES = (
+    "不开心", "不高兴", "不快乐", "不兴奋", "不期待",
+    "不怎么开心", "不怎么高兴", "不是很开心", "不是很高兴",
+    "没那么开心", "没那么高兴", "不太开心", "并不开心", "没开心", "没有开心",
+)
+_DOUBLE_NEGATIONS = ("没有不开心", "没有不高兴", "不是不开心", "不是不高兴", "并没有不开心")
 
 
 def _has_marker(text: str, markers: tuple[str, ...]) -> bool:
@@ -143,7 +148,7 @@ def _has_marker(text: str, markers: tuple[str, ...]) -> bool:
                 break
             prefix = text[max(0, index - 3) : index]
             negated = any(
-                prefix.endswith(word) for word in ("不", "没", "别", "未", "无", "并不", "不太", "不太")
+                prefix.endswith(word) for word in ("不", "没", "别", "未", "无", "并不", "不太")
             )
             if not negated:
                 return True
@@ -158,7 +163,10 @@ def explicit_emotion_delta(text: str, limit: float = 0.16) -> PAD:
     magnitude = max(0.0, min(0.2, float(limit)))
     if not normalized or magnitude <= 0:
         return PAD(0.0, 0.0, 0.0)
-    # 否定式正向表达按负面处理（"不开心""不高兴"）
+    # 双重否定先判定（"没有不开心"不等于开心）
+    if any(pattern in normalized for pattern in _DOUBLE_NEGATIONS):
+        return PAD(0.0, 0.0, 0.0)
+    # 否定式正向表达按负面处理（"不开心""不怎么高兴"）
     if any(pattern in normalized for pattern in _NEGATION_PREFIXES):
         return PAD(-magnitude, magnitude * 0.5, -magnitude * 0.2)
     if _has_marker(normalized, _POSITIVE_EMOTION_MARKERS):

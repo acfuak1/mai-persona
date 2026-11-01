@@ -72,7 +72,7 @@ followup_enabled = true
 followup_extract_hours = 6.0
 followup_window_hours = 24.0
 followup_ttl_hours = 72.0
-# 负面情绪后让角色情绪回落得更慢
+# 负面情绪后暂停给该用户插入跟进提示（不影响全局心境）
 emotion_carry_over_hours = 2.0
 # 检测到摩擦时提示先修复
 repair_enabled = true
