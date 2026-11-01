@@ -12,6 +12,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from maibot_sdk import API, Command, EventHandler, HookHandler, MaiBotPlugin, Tool
+from maibot_sdk.config import validate_plugin_config
 from maibot_sdk.types import (
     ErrorPolicy,
     EventType,
@@ -54,7 +55,7 @@ from .mai_persona.engine_todos import apply_todo_result
 from .mai_persona.mem_adapter import MemoryAdapter
 from .mai_persona.prompting import persona_block, render_prompt
 from .mai_persona.storage import PersonaStore
-from .mai_persona.webui import build_dashboard_snapshot
+from .mai_persona.webui import build_dashboard_snapshot, build_setup_status
 
 
 class MaiPersonaPlugin(MaiBotPlugin):
@@ -78,6 +79,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
         self._maitrace_schedule_task: asyncio.Task[Any] | None = None
         self._maitrace_schedule_last_attempt = 0.0
         self._maitrace_schedule_enabled: bool | None = None
+        self._config_preview: dict[str, str] = {}
 
     async def on_load(self) -> None:
         self._maitrace_schedule_enabled = self.config.batch.use_maitrace_schedule
@@ -1932,6 +1934,123 @@ class MaiPersonaPlugin(MaiBotPlugin):
             }
         )
         return snapshot
+
+    @API("webui_setup_status", description="读取配置向导的完成情况", version="1")
+    async def webui_setup_status(self) -> dict[str, Any]:
+        return build_setup_status(self.config)
+
+    @API("webui_config_preview", description="读取上一次生成的配置片段", version="1")
+    async def webui_config_preview(self) -> dict[str, str]:
+        if not self._config_preview:
+            return {
+                "status": "尚未生成",
+                "body": "填写左侧任意一项后点击“生成配置片段”，这里会给出可直接粘贴的 TOML。",
+            }
+        return dict(self._config_preview)
+
+    @API("webui_compose_config", description="按向导输入生成并校验配置片段", version="1")
+    async def webui_compose_config(
+        self,
+        name: str = "",
+        viewpoint: str = "",
+        goals: str = "",
+        stages: str = "",
+        event_domains: str = "",
+        micro_domains: str = "",
+        daily_limit: str = "",
+        proactive: str = "keep",
+    ) -> dict[str, str]:
+        """把向导输入合并进当前配置并校验，返回可直接粘贴的 TOML 片段。
+
+        Host 只允许插件管理内置插件写入 config.toml，因此这里只生成片段，
+        由用户粘贴到配置文件后在插件管理页重载。
+        """
+
+        def items(value: str) -> list[str]:
+            return [
+                part.strip()
+                for part in re.split(r"[\n、,，;；]+", str(value or ""))
+                if part.strip()
+            ]
+
+        overrides: dict[str, tuple[str, str, Any]] = {}
+        if name.strip():
+            overrides["name"] = ("persona", "name", name.strip())
+        if items(viewpoint):
+            overrides["viewpoint"] = ("persona", "viewpoint", items(viewpoint))
+        if goals.strip():
+            overrides["goals"] = ("persona", "goals", goals.strip())
+        if items(stages):
+            overrides["relationship_stages"] = ("persona", "relationship_stages", items(stages))
+        if items(event_domains):
+            overrides["event_line_domains"] = ("persona", "event_line_domains", items(event_domains))
+        if items(micro_domains):
+            overrides["micro_event_domains"] = ("persona", "micro_event_domains", items(micro_domains))
+        if daily_limit.strip():
+            if not daily_limit.strip().isdigit():
+                self._config_preview = {"status": "校验失败", "body": "每日主动联系上限必须是 0 至 100 的整数。"}
+                return dict(self._config_preview)
+            overrides["daily_limit"] = ("schedule", "daily_limit", int(daily_limit.strip()))
+        if proactive in {"on", "off"}:
+            overrides["enable_proactive_messages"] = (
+                "plugin",
+                "enable_proactive_messages",
+                proactive == "on",
+            )
+        if not overrides:
+            self._config_preview = {
+                "status": "没有需要修改的项",
+                "body": "至少填写一项，或选择主动联系开关后再生成。",
+            }
+            return dict(self._config_preview)
+
+        data = self.config.model_dump()
+        for section, key, value in overrides.values():
+            data.setdefault(section, {})[key] = value
+        try:
+            validated = validate_plugin_config(MaiPersonaConfig, data)
+        except Exception as exc:
+            self._config_preview = {
+                "status": "校验失败",
+                "body": f"配置未通过校验：{exc}",
+            }
+            return dict(self._config_preview)
+
+        merged = validated.model_dump()
+        lines: list[str] = []
+        for section in ("plugin", "persona", "schedule"):
+            keys = [key for key, (sec, _, _) in overrides.items() if sec == section]
+            if not keys:
+                continue
+            lines.append(f"[{section}]")
+            for key in keys:
+                value = merged[section][key]
+                if isinstance(value, bool):
+                    rendered = "true" if value else "false"
+                elif isinstance(value, list):
+                    rendered = "[" + ", ".join(json.dumps(item, ensure_ascii=False) for item in value) + "]"
+                elif isinstance(value, (int, float)):
+                    rendered = str(value)
+                else:
+                    rendered = json.dumps(str(value), ensure_ascii=False)
+                lines.append(f"{key} = {rendered}")
+            lines.append("")
+        body = "\n".join(lines).strip()
+        still_missing = validated.validate_persona()
+        status_text = f"已生成 {len(overrides)} 项修改"
+        if still_missing:
+            status_text += f"，仍有 {len(still_missing)} 项未完成：{'、'.join(still_missing)}"
+        else:
+            status_text += "，配置校验通过"
+        self._config_preview = {
+            "status": status_text,
+            "body": (
+                body
+                + "\n\n把以上内容粘贴到 config.toml 对应段落，保存后在插件管理页重载插件。"
+                + "未列出的字段保持原值。"
+            ),
+        }
+        return dict(self._config_preview)
 
     @Command("persona_status", description="查看 Mai Persona 当前运行状态", pattern=r"^/persona_status$")
     async def handle_persona_status(self, stream_id: str = "", **kwargs: Any):

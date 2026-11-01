@@ -147,3 +147,58 @@ def build_dashboard_snapshot(
         for row in todo_rows
     ]
     return snapshot
+
+
+def build_setup_status(config: Any) -> dict[str, Any]:
+    """汇总配置向导各步骤的完成情况，供侧栏页面直接展示。"""
+
+    persona = config.persona
+    name = persona.name.strip()
+    viewpoints = [item.strip() for item in persona.viewpoint if item.strip()]
+    goals = persona.goals.strip()
+    stages = [item.strip() for item in persona.relationship_stages if item.strip()]
+    event_domains = [item.strip() for item in persona.event_line_domains if item.strip()]
+    micro_domains = [item.strip() for item in persona.micro_event_domains if item.strip()]
+    missing = config.validate_persona()
+
+    checks = [
+        ("角色称呼", bool(name), name or "未填写"),
+        ("状态评价视角", bool(viewpoints), f"{len(viewpoints)} 条"),
+        ("长期生活方向", bool(goals), "已填写" if goals else "未填写"),
+        ("关系阶段", len(stages) >= 2, f"{len(stages)} 个" if stages else "未填写"),
+        (
+            "生活领域",
+            bool(event_domains) and bool(micro_domains),
+            f"事件线 {len(event_domains)} 个 / 小事件 {len(micro_domains)} 个",
+        ),
+    ]
+    done = sum(1 for _, ok, _ in checks if ok)
+    total = len(checks)
+    lines = [f"{'✅' if ok else '⬜'} {label}：{value}" for label, ok, value in checks]
+
+    proactive_on = bool(config.plugin.enable_proactive_messages)
+    silent = config.schedule.silent_hours
+    proactive_lines = [
+        f"{'✅' if proactive_on else '⬜'} 允许主动联系：{'已开启' if proactive_on else '未开启（可选）'}",
+        f"{'✅' if config.schedule.decide_after_private_chat_end else '⬜'} 私聊结束后排程："
+        f"{'已开启' if config.schedule.decide_after_private_chat_end else '未开启（可选）'}",
+        f"每日上限 {config.schedule.daily_limit} 次，最小间隔 {config.schedule.min_interval_hours:g} 小时，"
+        f"静默时段 {silent[0]:02d}:00-{silent[1]:02d}:00",
+    ]
+
+    if missing:
+        next_step = f"下一步：在“插件设置”中补齐{missing[0]}"
+    elif not proactive_on:
+        next_step = "下一步：确认聊天表现符合预期后，可在“插件设置”开启允许主动联系"
+    else:
+        next_step = "配置已完整，可直接在聊天中验证效果"
+
+    return {
+        "completion": round(done / total * 100),
+        "summary": f"已完成 {done}/{total} 项",
+        "ready": "可以启用" if not missing else f"还需补齐 {len(missing)} 项",
+        "missing": "、".join(missing) if missing else "无",
+        "next_step": next_step,
+        "steps_persona": "\n".join(lines),
+        "steps_proactive": "\n".join(proactive_lines),
+    }

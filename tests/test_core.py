@@ -813,6 +813,58 @@ class PluginContractTests(unittest.TestCase):
         finally:
             sys.modules.pop(module_name, None)
 
+    def test_setup_wizard_builds_valid_config_snippet(self) -> None:
+        module_name = "mai_persona_setup_wizard_test"
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            PLUGIN_ROOT / "plugin.py",
+            submodule_search_locations=[str(PLUGIN_ROOT)],
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            plugin = module.create_plugin()
+            plugin.set_plugin_config({"plugin": {"enabled": True, "config_version": "1.0.0"}})
+
+            status = asyncio.run(plugin.webui_setup_status())
+            self.assertEqual(status["completion"], 0)
+            self.assertIn("角色名称", status["missing"])
+            self.assertEqual(asyncio.run(plugin.webui_config_preview())["status"], "尚未生成")
+            result = asyncio.run(
+                plugin.webui_compose_config(
+                    name="小熙",
+                    viewpoint="先区分事实与猜测\n单次未回复不视为关系变差",
+                    stages="陌生、熟悉、朋友",
+                    proactive="on",
+                )
+            )
+            self.assertIn("已生成 4 项修改", result["status"])
+            self.assertIn("仍有", result["status"])
+            self.assertIn("[persona]", result["body"])
+            self.assertIn('name = "小熙"', result["body"])
+            self.assertIn("[\"陌生\", \"熟悉\", \"朋友\"]", result["body"])
+            self.assertIn("[plugin]", result["body"])
+            self.assertIn("enable_proactive_messages = true", result["body"])
+            self.assertIn("config.toml", result["body"])
+
+            # 生成的是待粘贴片段，不会直接改写当前配置
+            status = asyncio.run(plugin.webui_setup_status())
+            self.assertEqual(status["completion"], 0)
+            self.assertIn("角色名称", status["missing"])
+
+            self.assertEqual(
+                asyncio.run(plugin.webui_compose_config(daily_limit="abc"))["status"],
+                "校验失败",
+            )
+            single_stage = asyncio.run(plugin.webui_compose_config(stages="只有一段"))
+            self.assertIn("仍有", single_stage["status"])
+            self.assertIn("关系阶段", single_stage["status"])
+        finally:
+            sys.modules.pop(module_name, None)
+
     def test_private_chat_end_queues_targeted_schedule_decision(self) -> None:
         module_name = "mai_persona_chat_end_decide_test"
         spec = importlib.util.spec_from_file_location(

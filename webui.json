@@ -329,6 +329,255 @@
           ]
         }
       ]
+    },
+    {
+      "id": "setup",
+      "title": "配置向导",
+      "placement": "sidebar",
+      "mode": "declarative",
+      "icon": "settings",
+      "description": "按步骤检查配置，并生成可直接粘贴到 config.toml 的片段。",
+      "queries": {
+        "setup": {
+          "api": "webui_setup_status",
+          "version": "1"
+        },
+        "preview": {
+          "api": "webui_config_preview",
+          "version": "1"
+        }
+      },
+      "actions": {
+        "compose": {
+          "api": "webui_compose_config",
+          "version": "1",
+          "parameters": {
+            "name": {
+              "type": "string",
+              "required": false,
+              "max_length": 80
+            },
+            "viewpoint": {
+              "type": "string",
+              "required": false,
+              "max_length": 2000
+            },
+            "goals": {
+              "type": "string",
+              "required": false,
+              "max_length": 2000
+            },
+            "stages": {
+              "type": "string",
+              "required": false,
+              "max_length": 500
+            },
+            "event_domains": {
+              "type": "string",
+              "required": false,
+              "max_length": 500
+            },
+            "micro_domains": {
+              "type": "string",
+              "required": false,
+              "max_length": 500
+            },
+            "daily_limit": {
+              "type": "string",
+              "required": false,
+              "max_length": 8
+            },
+            "proactive": {
+              "type": "string",
+              "required": false,
+              "choices": ["keep", "on", "off"]
+            }
+          }
+        }
+      },
+      "auto_refresh": true,
+      "poll_interval_seconds": 30,
+      "content": [
+        {
+          "type": "grid",
+          "columns": 2,
+          "children": [
+            {
+              "type": "stat",
+              "label": "配置完成度",
+              "value": {
+                "source": "setup",
+                "field": "summary"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "当前状态",
+              "value": {
+                "source": "setup",
+                "field": "ready"
+              }
+            }
+          ]
+        },
+        {
+          "type": "progress",
+          "label": "完成进度",
+          "value": {
+            "source": "setup",
+            "field": "completion"
+          }
+        },
+        {
+          "type": "text",
+          "label": "下一步",
+          "value": {
+            "source": "setup",
+            "field": "next_step"
+          }
+        },
+        {
+          "type": "collapsible",
+          "label": "第 1 步 · 角色资料与生活领域",
+          "default_open": true,
+          "children": [
+            {
+              "type": "text",
+              "value": {
+                "source": "setup",
+                "field": "steps_persona"
+              },
+              "format": "plain"
+            },
+            {
+              "type": "text",
+              "value": "角色称呼只用于标记插件维护的状态，建议与 MaiBot 人格使用同一称呼；状态评价视角写判断依据；长期生活方向用于模拟日常，不是每轮对话都要讲的目标。",
+              "format": "plain"
+            }
+          ]
+        },
+        {
+          "type": "collapsible",
+          "label": "第 2 步 · 主动联系（可选）",
+          "default_open": false,
+          "children": [
+            {
+              "type": "text",
+              "value": {
+                "source": "setup",
+                "field": "steps_proactive"
+              },
+              "format": "plain"
+            },
+            {
+              "type": "text",
+              "value": "主动联系默认关闭。开启后仍受最小间隔、每日上限和静默时段约束；“私聊结束后由 Planner 决定下次联系时间”需要单独开启。",
+              "format": "plain"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "label": "第 3 步 · 生成配置片段",
+          "children": [
+            {
+              "type": "text",
+              "value": "填写需要修改的项，留空表示保持原值。多个值用顿号、逗号或换行分隔。生成结果只包含你填写的字段，粘贴到 config.toml 后重载插件即可生效。",
+              "format": "plain"
+            },
+            {
+              "type": "input",
+              "name": "name",
+              "label": "角色称呼",
+              "value": ""
+            },
+            {
+              "type": "input",
+              "name": "viewpoint",
+              "label": "状态评价视角（可多条）",
+              "value": ""
+            },
+            {
+              "type": "input",
+              "name": "goals",
+              "label": "长期生活方向",
+              "value": ""
+            },
+            {
+              "type": "input",
+              "name": "stages",
+              "label": "关系阶段（由浅到深）",
+              "value": ""
+            },
+            {
+              "type": "input",
+              "name": "event_domains",
+              "label": "长期事件线领域",
+              "value": ""
+            },
+            {
+              "type": "input",
+              "name": "micro_domains",
+              "label": "日常小事领域",
+              "value": ""
+            },
+            {
+              "type": "input",
+              "name": "daily_limit",
+              "label": "每日主动联系上限（0-100）",
+              "value": ""
+            },
+            {
+              "type": "select",
+              "name": "proactive",
+              "label": "允许主动联系",
+              "value": "keep",
+              "options": [
+                {
+                  "label": "保持不变",
+                  "value": "keep"
+                },
+                {
+                  "label": "开启",
+                  "value": "on"
+                },
+                {
+                  "label": "关闭",
+                  "value": "off"
+                }
+              ]
+            },
+            {
+              "type": "button",
+              "label": "生成配置片段",
+              "action": "compose",
+              "variant": "primary"
+            }
+          ]
+        },
+        {
+          "type": "card",
+          "label": "生成结果",
+          "children": [
+            {
+              "type": "text",
+              "value": {
+                "source": "preview",
+                "field": "status"
+              },
+              "format": "plain"
+            },
+            {
+              "type": "text",
+              "value": {
+                "source": "preview",
+                "field": "body"
+              },
+              "format": "log"
+            }
+          ]
+        }
+      ]
     }
   ]
 }
