@@ -47,7 +47,7 @@ from mai_persona.maitrace_schedule import (
     normalize_schedule,
     normalize_snapshot,
 )
-from mai_persona.mem_adapter import MemoryAdapter
+from mai_persona.mem_adapter import MemoryAdapter, _flatten_result
 from mai_persona.storage import PersonaStore
 from mai_persona.webui import build_dashboard_snapshot
 
@@ -98,6 +98,22 @@ class DomainTests(unittest.TestCase):
         self.assertFalse(user_filter_allows("blacklist", "u1", [], ["u1"]))
         self.assertTrue(user_filter_allows("blacklist", "u2", [], ["u1"]))
         self.assertTrue(user_filter_allows("unknown", "u2", [], ["u2"]))
+
+    def test_memory_no_result_placeholder_is_not_a_fact(self) -> None:
+        self.assertEqual(
+            _flatten_result(
+                {
+                    "success": True,
+                    "content": "你不太了解有关3510472225 最近 24 小时的具体互动事实的知识",
+                }
+            ),
+            [],
+        )
+        self.assertEqual(
+            _flatten_result({"success": True, "content": "你知道这些知识: 事实A\n事实B"}),
+            ["事实A", "事实B"],
+        )
+        self.assertEqual(_flatten_result({"success": True, "content": ""}), [])
 
     def test_maitrace_schedule_snapshot_is_normalized_and_private_items_filtered(self) -> None:
         snapshot = normalize_snapshot(
@@ -190,6 +206,26 @@ class DomainTests(unittest.TestCase):
                     1001.0,
                 )
                 self.assertEqual(changed, 1)
+                self.assertEqual(store.affection("u1")["trust"], 0.1)
+
+                placeholder = "你不太了解有关u1 最近 24 小时的具体互动事实的知识"
+                changed = apply_changes(
+                    store,
+                    [
+                        {
+                            "user_id": "u1",
+                            "d_trust": 0.1,
+                            "d_intimacy": 0.0,
+                            "d_rapport": 0.0,
+                            "reason": "引用了占位句",
+                            "facts_refs": [placeholder],
+                        }
+                    ],
+                    {"u1": [placeholder]},
+                    0.1,
+                    1002.0,
+                )
+                self.assertEqual(changed, 0)
                 self.assertEqual(store.affection("u1")["trust"], 0.1)
             finally:
                 store.close()
@@ -910,6 +946,59 @@ class PluginContractTests(unittest.TestCase):
                     )
                     self.assertTrue(applied)
                     self.assertEqual(store.get_schedule()["target_user"], "u2")
+                finally:
+                    plugin._store = None
+                    store.close()
+        finally:
+            sys.modules.pop(module_name, None)
+
+    def test_affection_evaluation_falls_back_to_local_interactions(self) -> None:
+        module_name = "mai_persona_affection_fallback_test"
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            PLUGIN_ROOT / "plugin.py",
+            submodule_search_locations=[str(PLUGIN_ROOT)],
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            with tempfile.TemporaryDirectory() as temp:
+                plugin = module.create_plugin()
+                plugin.set_plugin_config(
+                    {"plugin": {"enabled": True, "config_version": "1.0.0"}}
+                )
+                plugin._set_context(
+                    types.SimpleNamespace(api=Mock(), logger=Mock(spec=logging.Logger))
+                )
+                store = PersonaStore(Path(temp) / "persona.db")
+                plugin._store = store
+                plugin._memory = None
+                try:
+                    now = plugin._now()
+                    store.initialize_emotion(PAD(0.0, 0.0, 0.0), now.timestamp())
+                    store.add_interaction(
+                        now.timestamp() - 60, "u1", "s1", "user", "我今天面试通过了"
+                    )
+                    queued = asyncio.run(
+                        plugin._evaluate_affection_for_users(["u1"], now, "affection:test")
+                    )
+                    self.assertEqual(queued, 1)
+                    works = store.pending_planner_work(limit=3)
+                    self.assertEqual(works[0]["task_type"], "affection_evaluate")
+                    payload = works[0]["payload"]
+                    self.assertEqual(payload["available_facts"]["u1"], ["我今天面试通过了"])
+
+                    self.assertEqual(
+                        asyncio.run(
+                            plugin._evaluate_affection_for_users(
+                                ["u2"], now, "affection:test-empty"
+                            )
+                        ),
+                        0,
+                    )
                 finally:
                     plugin._store = None
                     store.close()

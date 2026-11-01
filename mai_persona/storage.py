@@ -481,6 +481,18 @@ class PersonaStore:
         )
         return list(reversed(rows))
 
+    def user_interactions_since(self, user_id: str, since: float, limit: int = 10) -> list[str]:
+        """返回某个用户在时间窗口内的对话原文，供没有长期记忆时作为可核对依据。"""
+
+        if not user_id:
+            return []
+        rows = self.fetchall(
+            "SELECT content FROM interaction_queue WHERE user_id=? AND ts>=? "
+            "ORDER BY ts DESC, id DESC LIMIT ?",
+            (user_id, since, max(1, min(int(limit), 50))),
+        )
+        return [str(row["content"]).strip() for row in reversed(rows) if str(row["content"]).strip()]
+
     def relationship(self, user_id: str) -> dict[str, Any] | None:
         return self.fetchone("SELECT * FROM relationship WHERE user_id=?", (user_id,))
 

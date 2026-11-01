@@ -48,6 +48,28 @@ class MemoryAdapter:
         )
 
 
+_KNOWLEDGE_PREFIX = "你知道这些知识:"
+_NO_RESULT_MARKERS = ("你不太了解有关",)
+
+
+def _content_lines(content: str) -> list[str]:
+    """把宿主的检索文本拆成条目，并丢弃“没有检索到”的占位句。"""
+
+    lines: list[str] = []
+    for raw in content.splitlines():
+        line = raw.strip(" \t-")
+        if not line:
+            continue
+        if any(marker in line for marker in _NO_RESULT_MARKERS):
+            continue
+        if line.startswith(_KNOWLEDGE_PREFIX):
+            line = line[len(_KNOWLEDGE_PREFIX) :].strip()
+            if not line:
+                continue
+        lines.append(line)
+    return lines
+
+
 def _flatten_result(result: Any) -> list[str]:
     if isinstance(result, dict):
         if result.get("success") is False:
@@ -57,10 +79,10 @@ def _flatten_result(result: Any) -> list[str]:
             return [str(item).strip() for item in facts if str(item).strip()]
         content = result.get("content")
         if isinstance(content, str):
-            return [line.strip(" \t-") for line in content.splitlines() if line.strip()]
+            return _content_lines(content)
         return []
     if isinstance(result, list):
         return [str(item).strip() for item in result if str(item).strip()]
     if isinstance(result, str):
-        return [line.strip(" \t-") for line in result.splitlines() if line.strip()]
+        return _content_lines(result)
     return []

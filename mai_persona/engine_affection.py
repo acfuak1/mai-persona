@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+_NO_RESULT_MARKERS = ("你不太了解有关",)
+
 
 def apply_changes(
     store: Any,
@@ -20,7 +22,12 @@ def apply_changes(
         refs = change.get("facts_refs")
         if not isinstance(refs, list):
             continue
-        evidence = [str(ref).strip() for ref in refs if str(ref).strip()]
+        evidence = [
+            str(ref).strip()
+            for ref in refs
+            if str(ref).strip()
+            and not any(marker in str(ref) for marker in _NO_RESULT_MARKERS)
+        ]
         known = set(available_facts.get(user_id, []))
         matched = [ref for ref in evidence if ref in known]
         reason = str(change.get("reason", "")).strip()

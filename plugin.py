@@ -945,19 +945,28 @@ class MaiPersonaPlugin(MaiBotPlugin):
         now: datetime,
         dedupe_key: str | None = None,
     ) -> int:
-        if not user_ids or self._memory is None:
+        if not user_ids:
             return 0
+        store = self._require_store()
         since = now.timestamp() - self.config.affection.evidence_hours * 3600
         available: dict[str, list[str]] = {}
         user_data: list[dict[str, Any]] = []
         for user_id in user_ids:
-            facts = await self._memory.search_facts(
-                f"{user_id} 最近 24 小时的具体互动事实",
-                user_id=user_id,
-                limit=10,
-                time_start=since,
-                time_end=now.timestamp(),
-            )
+            memory_facts: list[str] = []
+            if self._memory is not None:
+                memory_facts = await self._memory.search_facts(
+                    f"{user_id} 最近 24 小时的具体互动事实",
+                    user_id=user_id,
+                    limit=10,
+                    time_start=since,
+                    time_end=now.timestamp(),
+                )
+            # 宿主长期记忆没有近况时，用插件自己记录的对话原文兜底，保证依据仍可逐字核对
+            local_facts = [
+                text[:300]
+                for text in store.user_interactions_since(user_id, since, limit=10)
+            ]
+            facts = list(dict.fromkeys([*memory_facts, *local_facts]))[:12]
             if not facts:
                 continue
             available[user_id] = facts
@@ -965,8 +974,8 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 {
                     "user_id": user_id,
                     "facts": facts,
-                    "affection": self._require_store().affection(user_id) or {},
-                    "relationship": self._require_store().relationship(user_id) or {},
+                    "affection": store.affection(user_id) or {},
+                    "relationship": store.relationship(user_id) or {},
                 }
             )
         if not user_data:
