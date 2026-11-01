@@ -61,6 +61,74 @@
         },
         {
           "type": "grid",
+          "columns": 4,
+          "children": [
+            {
+              "type": "stat",
+              "label": "表达能量",
+              "value": {
+                "source": "snapshot",
+                "field": "humanlike_energy"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "待跟进",
+              "value": {
+                "source": "snapshot",
+                "field": "humanlike_followups"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "谈话边界",
+              "value": {
+                "source": "snapshot",
+                "field": "humanlike_boundaries"
+              }
+            },
+            {
+              "type": "stat",
+              "label": "未化解不快",
+              "value": {
+                "source": "snapshot",
+                "field": "humanlike_grudge"
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "columns": 2,
+          "children": [
+            {
+              "type": "text",
+              "label": "修复提示",
+              "value": {
+                "source": "snapshot",
+                "field": "humanlike_repairs"
+              }
+            },
+            {
+              "type": "text",
+              "label": "缺席状态",
+              "value": {
+                "source": "snapshot",
+                "field": "humanlike_absence"
+              }
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "label": "对方说话长度",
+          "value": {
+            "source": "snapshot",
+            "field": "humanlike_style"
+          }
+        },
+        {
+          "type": "grid",
           "columns": 3,
           "children": [
             {

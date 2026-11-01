@@ -38,9 +38,18 @@ from .mai_persona.engine_emotion import (
 from .mai_persona.engine_events import apply_advances
 from .mai_persona.engine_humanlike import (
     carry_over_scale,
+    closeness,
+    detect_boundary,
     detect_friction,
+    detect_peak,
     disclosure_depth,
     disclosure_hint,
+    drain_energy,
+    grudge_decay,
+    recover_energy,
+    scale_by_closeness,
+    style_hint as humanlike_style_hint,
+    update_style_stats,
 )
 from .mai_persona.engine_life import slots_elapsed, validate_life_result
 from .mai_persona.maitrace_schedule import (
@@ -268,6 +277,24 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 + str(repairs[0]["summary"])[:120]
                 + "。如果合适，先承认对方的感受再温和修复，不要辩解或直接转移话题。"
             )
+        if user_id:
+            boundaries = store.active_boundaries(
+                user_id, now.timestamp(), self.config.humanlike.boundary_ttl_days, limit=2
+            )
+            if boundaries:
+                pending_summary += (
+                    "\\n对方明确表示不想聊的话题："
+                    + "；".join(f"「{str(item['topic'])[:40]}」" for item in boundaries)
+                    + "。不要主动提起。"
+                )
+            if store.current_absence(user_id, now.timestamp()) is not None:
+                pending_summary += "\\n对方说过这几天不在：不要安排主动联系，也不要催回复。"
+            grudge = float((store.get_grudge(user_id) or {}).get("value", 0.0) or 0.0)
+            if self.config.humanlike.grudge_enabled and grudge >= 0.1:
+                pending_summary += "\\n双方还有未化解的不快：主动联系要更谨慎。"
+        energy = float(store.get_meta("energy", "1") or 1)
+        if self.config.humanlike.energy_enabled and energy < 0.2:
+            pending_summary += "\\n角色表达能量很低：本轮不安排新的主动联系。"
         return (
             "[Mai Persona 角色设定]\n"
             f"{persona_block(self.config.persona)}\n\n"
@@ -500,6 +527,43 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 for item in payload.get("messages", [])
                 if isinstance(item, dict)
             }
+            absences = result.get("absences") if isinstance(result.get("absences"), list) else []
+            planned = 0
+            for item in absences[:5]:
+                if not isinstance(item, dict):
+                    continue
+                absence_user = str(item.get("user_id", "")).strip()
+                absence_source = str(item.get("source", "")).strip()
+                if absence_user not in allowed_users or absence_source not in known_sources:
+                    continue
+                kind = str(item.get("kind", "away")).strip() or "away"
+                if kind not in {"away", "busy", "low_availability"}:
+                    kind = "away"
+                try:
+                    start_hours = float(item.get("start_in_hours", 0))
+                except (TypeError, ValueError):
+                    start_hours = 0.0
+                try:
+                    duration_hours = float(item.get("duration_hours", 0))
+                except (TypeError, ValueError):
+                    duration_hours = 0.0
+                start_at = now.timestamp() + max(0.0, start_hours) * 3600
+                if duration_hours > 0:
+                    return_at = start_at + min(duration_hours, 24.0 * 90) * 3600
+                    end_at: float | None = return_at
+                else:
+                    return_at = start_at + 7 * 86400
+                    end_at = None
+                store.add_absence(
+                    absence_user,
+                    kind,
+                    start_at,
+                    end_at,
+                    return_at,
+                    absence_source,
+                    now.timestamp(),
+                )
+                planned += 1
             max_due = float(payload.get("max_due_hours", 72) or 72)
             added = 0
             for item in result["followups"][:10]:
@@ -515,16 +579,23 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 except (TypeError, ValueError):
                     due_hours = 12.0
                 due_hours = max(1.0, min(due_hours, max_due))
+                due_at = now.timestamp() + due_hours * 3600
+                absence = store.upcoming_absence(user_id, now.timestamp())
+                if absence is not None:
+                    return_at = float(
+                        absence.get("expected_return_at") or absence.get("end_at") or 0.0
+                    )
+                    due_at = max(due_at, return_at + 3600)
                 store.add_relationship_event(
                     "followup",
                     user_id,
                     summary,
                     now=now.timestamp(),
                     source=source,
-                    due_at=now.timestamp() + due_hours * 3600,
+                    due_at=due_at,
                 )
                 added += 1
-            self.ctx.logger.info("Planner 完成跟进事项整理：新增 %d 条", added)
+            self.ctx.logger.info("Planner 完成跟进事项整理：新增 %d 条，计划缺席 %d 条", added, planned)
             return True
 
         if task_type == "event_advance":
@@ -653,6 +724,10 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 state["emo_label"],
             )
 
+        self._update_energy(now)
+        self._decay_grudges(now)
+        self._apply_absence_dip(now)
+
         await self._generate_daily_life(now)
         await self._evaluate_due_micro_events(now)
         await self._evaluate_changed_event_lines(now)
@@ -661,6 +736,59 @@ class MaiPersonaPlugin(MaiBotPlugin):
         await self._run_daily_jobs(now)
         await self._run_proactive_schedule(now)
         await self._decide_schedule_if_due(now)
+
+    def _update_energy(self, now: datetime) -> None:
+        config = self.config.humanlike
+        if not config.energy_enabled:
+            return
+        store = self._require_store()
+        updated = float(store.get_meta("energy_updated_at", "0") or 0.0)
+        if updated <= 0:
+            store.set_meta("energy_updated_at", now.timestamp())
+            return
+        energy = float(store.get_meta("energy", "1") or 1)
+        recovered = recover_energy(energy, now.timestamp() - updated, config.energy_tau_hours)
+        store.set_meta("energy", round(recovered, 4))
+        store.set_meta("energy_updated_at", now.timestamp())
+
+    def _drain_energy(self, amount: float) -> None:
+        if not self.config.humanlike.energy_enabled:
+            return
+        store = self._require_store()
+        energy = float(store.get_meta("energy", "1") or 1)
+        store.set_meta("energy", round(drain_energy(energy, amount), 4))
+        store.set_meta("energy_updated_at", self._now().timestamp())
+
+    def _decay_grudges(self, now: datetime) -> None:
+        config = self.config.humanlike
+        if not config.grudge_enabled:
+            return
+        store = self._require_store()
+        for row in store.all_grudges():
+            value = grudge_decay(
+                float(row["value"] or 0.0),
+                now.timestamp() - float(row["updated_at"] or now.timestamp()),
+                config.grudge_tau_days,
+            )
+            store.set_grudge(str(row["user_id"]), value if value >= 0.01 else 0.0, now.timestamp())
+
+    def _apply_absence_dip(self, now: datetime) -> None:
+        config = self.config.humanlike
+        if config.absence_dip <= 0:
+            return
+        store = self._require_store()
+        for row in store.users_last_interaction(limit=3):
+            user_id = str(row["user_id"])
+            if now.timestamp() - float(row["last"]) < config.absence_dip_hours * 3600:
+                continue
+            if store.current_absence(user_id, now.timestamp()) is not None:
+                continue
+            key = f"absence_dip:{user_id}:{now.date().isoformat()}"
+            if store.get_meta(key):
+                continue
+            store.set_meta(key, "1")
+            delta = scale_by_closeness(config.absence_dip, self._closeness_for(user_id))
+            self._apply_small_mood(-delta, now.timestamp(), "absence", "长时间没有互动")
 
     @staticmethod
     def _parse_hhmm(value: str) -> time | None:
@@ -1352,6 +1480,21 @@ class MaiPersonaPlugin(MaiBotPlugin):
             store.clear_schedule()
             self.ctx.logger.info("排程属于询问型，期间用户已互动，已取消")
             return
+        if store.current_absence(target_user, now.timestamp()) is not None:
+            self.ctx.logger.info("目标用户处于计划内缺席，主动排程延后到回来之后")
+            absence = store.current_absence(target_user, now.timestamp()) or {}
+            return_at = float(absence.get("expected_return_at") or absence.get("end_at") or 0.0)
+            if return_at > now.timestamp():
+                store.postpone_schedule(return_at + 3600)
+            return
+        grudge = float((store.get_grudge(target_user) or {}).get("value", 0.0) or 0.0)
+        if self.config.humanlike.grudge_enabled and grudge >= 0.15:
+            self.ctx.logger.info("仍有未化解的不快，暂不主动联系")
+            return
+        energy = float(store.get_meta("energy", "1") or 1)
+        if self.config.humanlike.energy_enabled and energy < 0.2:
+            self.ctx.logger.debug("表达能量过低，暂不主动联系")
+            return
         allowed, reason = hard_guard(
             store,
             now=now,
@@ -1487,6 +1630,42 @@ class MaiPersonaPlugin(MaiBotPlugin):
         repairs = store.pending_relationship_events("repair", now.timestamp(), limit=1)
         if repairs:
             text += "\n上一轮有不愉快：先承认感受再温和修复，不辩解、不转移话题。"
+        value = self._closeness_for(user_id)
+        style_row = store.user_style(user_id) or {}
+        style_line = humanlike_style_hint(
+            float(style_row.get("median_len", 0.0) or 0.0),
+            int(style_row.get("samples", 0) or 0),
+            self.config.humanlike.style_min_samples,
+            value,
+        )
+        if style_line:
+            text += f"\n{style_line}"
+        boundaries = store.active_boundaries(
+            user_id, now.timestamp(), self.config.humanlike.boundary_ttl_days, limit=2
+        )
+        if boundaries:
+            text += (
+                "\n对方明确表示不想聊："
+                + "；".join(f"「{str(item['topic'])[:40]}」" for item in boundaries)
+                + "。不要主动提起这些话题。"
+            )
+        absence = store.current_absence(user_id, now.timestamp())
+        if absence is not None:
+            text += "\n对方之前说过这几天不在（出差/考试等）：回复慢是正常的，不催促、不表达被冷落。"
+        grudge = float((store.get_grudge(user_id) or {}).get("value", 0.0) or 0.0)
+        if self.config.humanlike.grudge_enabled and grudge >= 0.1:
+            text += "\n上一轮还有未化解的不快：语气收敛一些，不主动开新话题。"
+        energy = float(store.get_meta("energy", "1") or 1)
+        if self.config.humanlike.energy_enabled and energy < 0.35:
+            text += "\n表达能量偏低：回复更短，不主动开启新话题。"
+        if self.config.humanlike.peak_enabled and value >= self.config.humanlike.peak_min_closeness:
+            peak = store.pick_peak(
+                user_id,
+                now.timestamp(),
+                self.config.humanlike.peak_cooldown_days,
+            )
+            if peak is not None:
+                text += f"\n可以自然回指一次：「{str(peak['summary'])[:60]}」。"
         text += (
             "\n这些状态不覆盖 MaiBot 自有人格、行为准则、回复风格或用户本轮明确任务；"
             "只用于让表达与角色当前状态保持一致。"
@@ -1685,6 +1864,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 (stream_id, message_id),
             )
         is_new_interaction = existing is None
+        last_before = store.last_user_interaction_at(user_id)
         interaction_id = store.add_interaction(
             timestamp,
             user_id,
@@ -1727,6 +1907,7 @@ class MaiPersonaPlugin(MaiBotPlugin):
             self._apply_interaction_pulse(text, timestamp)
         if is_new_interaction:
             self._track_relationship_events(user_id, stream_id, text, timestamp)
+            self._track_humanlike_state(user_id, stream_id, text, timestamp, last_before)
         return interaction_id
 
     def _track_relationship_events(
@@ -1755,6 +1936,82 @@ class MaiPersonaPlugin(MaiBotPlugin):
             )
         elif delta.p > 0:
             store.resolve_user_events("repair", user_id, timestamp)
+
+    def _closeness_for(self, user_id: str) -> float:
+        store = self._require_store()
+        relationship = store.relationship(user_id) or {}
+        affection = store.affection(user_id) or {}
+        return closeness(
+            relationship.get("stage", ""),
+            self.config.persona.relationship_stages,
+            affection,
+        )
+
+    def _track_humanlike_state(
+        self,
+        user_id: str,
+        stream_id: str,
+        text: str,
+        timestamp: float,
+        last_before: float | None,
+    ) -> None:
+        """更新风格统计、边界、记忆峰值，并处理缺勤与重逢。"""
+
+        config = self.config.humanlike
+        store = self._require_store()
+        if config.style_adaptation:
+            row = store.user_style(user_id) or {}
+            median, samples = update_style_stats(
+                float(row.get("median_len", 0.0) or 0.0),
+                int(row.get("samples", 0) or 0),
+                len(text),
+            )
+            store.upsert_user_style(user_id, median, samples, timestamp)
+        if detect_boundary(text):
+            store.add_boundary(user_id, text[:60], text[:300], timestamp)
+        if config.peak_enabled and detect_peak(text):
+            store.add_peak(user_id, text[:80], text[:300], 0.8, timestamp)
+        self._drain_energy(0.02)
+
+        absence = store.current_absence(user_id, timestamp)
+        if absence is not None:
+            store.mark_absence_returned(user_id, timestamp)
+            return
+        if last_before is None:
+            return
+        gap = max(0.0, timestamp - float(last_before))
+        if gap < config.absence_dip_hours * 3600 or config.reunion_boost <= 0:
+            return
+        boost = scale_by_closeness(config.reunion_boost, self._closeness_for(user_id))
+        self._apply_small_mood(boost, timestamp, "reunion", "长时间没有互动后的重逢")
+
+    def _apply_small_mood(self, delta_p: float, timestamp: float, source: str, desc: str) -> None:
+        if abs(float(delta_p)) < 0.005:
+            return
+        store = self._require_store()
+        current = store.emotion() or {}
+        mood = PAD(
+            float(current.get("mood_p", 0.0)),
+            float(current.get("mood_a", 0.0)),
+            float(current.get("mood_d", 0.0)),
+        )
+        emotion = PAD(
+            float(current.get("emo_p", 0.0)) + float(delta_p),
+            float(current.get("emo_a", 0.0)),
+            float(current.get("emo_d", 0.0)),
+        ).bounded()
+        store.apply_emotion(
+            now=timestamp,
+            source=source,
+            event_desc=desc,
+            appraisal=desc,
+            facts_refs=[desc],
+            delta=PAD(float(delta_p), 0.0, 0.0),
+            layer="emotion",
+            label=emotion_label(emotion),
+            mood_label=emotion_label(mood),
+            emotion_label=emotion_label(emotion),
+        )
 
     def _apply_immediate_emotion_seed(self, text: str, timestamp: float) -> bool:
         """先把明确情绪变成小幅即时状态，避免必须等待 Planner 才首次变化。"""
@@ -2098,6 +2355,48 @@ class MaiPersonaPlugin(MaiBotPlugin):
                 "activity_source": activity_source,
             }
         )
+        humanlike = {
+            "humanlike_energy": "未启用",
+            "humanlike_followups": "0",
+            "humanlike_boundaries": "0",
+            "humanlike_grudge": "0.00",
+            "humanlike_absence": "无",
+            "humanlike_repairs": "0",
+            "humanlike_style": "样本不足",
+        }
+        if self._store is not None:
+            summary = self._store.humanlike_summary()
+            energy = float(self._store.get_meta("energy", "1") or 1)
+            top_grudge = max(
+                (float(row["value"] or 0.0) for row in self._store.all_grudges()),
+                default=0.0,
+            )
+            absence = self._store.any_upcoming_absence(now.timestamp())
+            style_note = "样本不足"
+            for row in self._store.users_last_interaction(limit=3):
+                current_user = str(row["user_id"])
+                style_row = self._store.user_style(current_user) or {}
+                if int(style_row.get("samples", 0) or 0) >= self.config.humanlike.style_min_samples:
+                    style_note = (
+                        f"{current_user}：约 {round(float(style_row.get('median_len', 0.0)))} 字/条"
+                    )
+                    break
+            humanlike.update(
+                {
+                    "humanlike_energy": (
+                        f"{round(energy * 100)}%"
+                        if self.config.humanlike.energy_enabled
+                        else "已关闭"
+                    ),
+                    "humanlike_followups": str(summary["followups"]),
+                    "humanlike_boundaries": str(summary["boundaries"]),
+                    "humanlike_grudge": f"{top_grudge:.2f}",
+                    "humanlike_absence": "计划缺席中" if absence else "无",
+                    "humanlike_repairs": str(summary["repairs"]),
+                    "humanlike_style": style_note,
+                }
+            )
+        snapshot.update(humanlike)
         return snapshot
 
     @API("webui_setup_status", description="读取配置向导的完成情况", version="1")

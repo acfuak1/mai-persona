@@ -73,3 +73,23 @@ emotion_carry_over_hours = 2.0
 # 检测到摩擦时提示先修复
 repair_enabled = true
 repair_ttl_hours = 24.0
+# 按对方说话长度收敛（越熟影响越明显）
+style_adaptation = true
+style_min_samples = 20
+# 用户明确不想聊的话题保留天数
+boundary_ttl_days = 30.0
+# 非计划内长时间没联系时的轻微失落与重逢回升（按亲密度缩放）
+absence_dip_hours = 72.0
+absence_dip = 0.06
+reunion_boost = 0.08
+# 摩擦留下的短期余怒（按亲密度缩放）
+grudge_enabled = true
+grudge_cap = 0.3
+grudge_tau_days = 3.0
+# 连续互动消耗、休息恢复的表达能量
+energy_enabled = true
+energy_tau_hours = 8.0
+# 只在关系较熟时回指过去的正面向细节
+peak_enabled = true
+peak_min_closeness = 0.35
+peak_cooldown_days = 5.0

@@ -1,75 +1,56 @@
-# 更拟人可以加什么（已按 MaiBot 原生能力去重）
+# 更拟人可以加什么（`0.2.0` 已实现）
 
-只看三件事是否成立，才值得由插件实现：
+判断标准：只有同时满足三条，才值得由插件实现。
 
-1. **需要跨轮次、跨天的持久状态**——MaiBot 的人格提示词是无状态的，每轮都要重新描述。
-2. **需要随时间衰减或累计**——例如情绪回落到基线、关系缓慢变化。
-3. **需要按用户区分并长期演进**——同一句话对刚认识的人和老朋友应有不同分量。
+1. **需要跨轮次、跨天的持久状态**——MaiBot 人格提示词是无状态的。
+2. **需要随时间衰减或累计**——例如余怒、能量、关系余温。
+3. **需要按用户区分并长期演进**——同一句话对刚认识的人和老朋友分量不同。
 
-凡是 MaiBot 人格配置、长期记忆检索、Planner/Replyer 提示词已经能稳定表达的，本文一律**不重复实现**，只在人格配置里写清楚。
+MaiBot 原生就能表达的（人格口吻、追问习惯、好消息回应、道别语气、事实回指、打字节奏、偏好设定、主动发消息动作）**不再实现**，只写进人格配置。
 
-## MaiBot 原生就能做，不放进插件
+## 统一缩放：亲密度
 
-| 能力 | MaiBot 原生做法 | 结论 |
-| --- | --- | --- |
-| 说话口吻、性格、依恋式表达（黏人/疏离） | `[personality]` 的 `personality` / `behavior_style` / `reply_style`，支持多套 profiles | 不实现，写进人格即可 |
-| 是否追问、何时接话、何时安静 | `behavior_style` | 不实现 |
-| 用户分享好消息时如何回应（建设性回应） | `behavior_style` + `reply_style` 一句话即可表达 | 不实现 |
-| 对话收尾的语气（温和道别） | `reply_style` | 不实现；插件只保留“结束信号 → 排程” |
-| 具体事实回指（“你上次说的那份报告”） | 长期记忆检索：`enable_memory_query_tool`、启发式回忆 | 不实现，插件不复制记忆 |
-| 角色的偏好、忌讳、长期目标设定 | `personality` 文本 | 不实现；插件只让目标随事件线变化 |
-| 打字延迟、分段发送等节奏 | 已有 `local.human-reply-speed` 等插件 | 不实现 |
-| 主动发消息这个动作本身 | `maisaka.proactive.trigger` 能力 | 不重复造；插件只决定“何时、找谁、为什么” |
+所有拟人效果都乘以 `closeness`（0~1），避免"刚认识就用老友量度"：
 
-这些能力即使由插件再实现一遍，也只会和人格配置打架，或者让同一个行为有两个来源。
+```
+closeness = 0.6 × 关系阶段进度 + 0.4 × 三维好感均值（映射到 0~1）
+实际幅度 = 基准值 × (0.1 + 0.9 × closeness)
+```
 
-## 值得做：三件需要状态的事（`0.1.9` 已实现）
+完全陌生时最多保留约 10% 的幅度；亲密度越高，效果越接近基准值。实现见 `engine_humanlike.closeness` / `scale_by_closeness`。
 
-### 1. 重要披露 → 延迟跟进
+## 已实现清单
 
-**研究**：亲密感取决于“感知到对方理解、认可并关心自己”（Reis & Shaver, 1988）。Laurenceau、Barrett 与 Pietromonaco（1998）发现“自我披露 → 感知回应 → 亲密感”的路径在日常互动中成立；关键在于**事后仍记得并回应**，而不是当轮追问。
+| 能力 | 状态与触发 | 表现 | 配置 |
+| --- | --- | --- | --- |
+| 跟进事项 | Planner 每 6 小时从发言中抽取，逐字校验原句 | 到期后在 Planner/回复上下文提示"可自然关心一句" | `followup_*` |
+| 披露深度 | 关系阶段序号 → 0/1/2 | 每轮注入"现在能聊多深" | `persona.disclosure_depth_gating` |
+| 情绪残留 | 负面情绪后 2 小时 | 回归时间常数 ×2.5 | `emotion_carry_over_hours` |
+| 冲突修复 | 指责/冷淡/对抗措辞 | 提示先修复，正面回应后结案 | `repair_*` |
+| 风格趋同 | 每用户长度统计（EMA） | 回复长度向对方靠拢，样本 ≥ 20 才生效 | `style_*` |
+| 谈话边界 | 显式回避措辞（"不想说""别问"） | 30 天内不主动提该话题 | `boundary_ttl_days` |
+| 计划缺席 | Planner 抽取"明天出差三天" | 缺席期间不催、不排主动、跟进顺延 | 复用跟进抽取 |
+| 缺席/重逢 | 非计划内 72 小时无互动 | 心境轻微下移；重逢小幅回升 | `absence_*`、`reunion_boost` |
+| 遗怨 | 摩擦累积，修复后回落 | 语气收敛、暂缓主动 | `grudge_*` |
+| 表达能量 | 每条互动消耗，按 8 小时恢复 | 低能量时回复更短、少开话题 | `energy_*` |
+| 记忆峰值 | 明确的高兴大事，关系较熟才回指 | 偶尔具体回指一次 | `peak_*` |
 
-**为什么 MaiBot 原生不够**：记忆能检索到“用户说过要面试”，但没有任何机制在 12–48 小时后主动提起；人格提示词也无法保证“这一条还没跟进”。
+## 研究依据
 
-**实现**：
-- 每 `followup_extract_hours` 把近期用户发言交给 Planner，抽取“值得之后关心一次”的事项；每条必须逐字引用原句，否则丢弃。
-- 事项写入 `relationship_events(kind='followup')`，带 `due_at`；到期后注入 Planner 与回复上下文，由 Planner 决定是否自然提起。
-- 已自然问到可调用 `resolve_persona_event` 结案；超过 `followup_ttl_hours` 自动失效。
+- **回应性**：Reis & Shaver, 1988；Laurenceau, Barrett & Pietromonaco, 1998。
+- **自我披露**：Collins & Miller, 1994；Aron et al., 1997。
+- **沟通适应**：Giles, 1973。
+- **隐私管理**：Petronio, 2002；Afifi & Guerrero, 2000。
+- **归因**：Weiner, 1985。
+- **归属需要**：Baumeister & Leary, 1995。
+- **修复与遗怨**：Gottman, 1994；McCullough, Fincham & Tsang, 2003。
+- **情绪传染**：Hatfield, Cacioppo & Rapson, 1993。
+- **昼夜与睡眠压力**：Borbély, 1982。
+- **峰终效应**：Kahneman et al., 1993。
 
-**边界**：只跟进用户主动说过的内容；敏感话题不重提；跟进只是提示，不额外占用主动联系次数。
+## 边界与伦理
 
-### 2. 关系阶段门控的披露深度
-
-**研究**：自我披露与喜欢互为因果（Collins & Miller, 1994）；逐步加深的披露能显著提升亲近感（Aron et al., 1997）；社会渗透理论强调深度要与关系阶段匹配。
-
-**为什么 MaiBot 原生不够**：人格提示词不知道“对这个人现在处于第几阶段”，只能给一个统一口吻。
-
-**实现**：
-- 按关系阶段序号推导披露深度：第 1 阶段表层、第 2 阶段个人经历、第 3 阶段起私密感受，见 `engine_humanlike.disclosure_depth`。
-- 每轮回复上下文注入一句对应的披露提示；`[persona].disclosure_depth_gating` 可关闭。
-
-**边界**：披露素材只能来自角色设定与事件线，不能编造与人格冲突的经历；只影响表达倾向，不改变关系阶段。
-
-### 3. 情绪残留与冲突修复
-
-**研究**：情绪会在互动中传染并延续（Hatfield, Cacioppo & Rapson, 1993）；Gottman（1994）的观察研究强调摩擦后的“修复尝试”与正负互动比例对关系稳定的作用。
-
-**为什么 MaiBot 原生不够**：`reply_style` 只能让角色“显得温和”，但无法表达“上一轮被冷落后的低落还没散去”，也不会记录修复是否发生。
-
-**实现**：
-- 情绪残留：用户明确表达负面情绪后写入 `carry_over_until`，这段时间内即时情绪的回归时间常数放大 2.5 倍，之后自动恢复。
-- 修复提示：检测到指责、冷淡或对抗意味的发言后，写入 `relationship_events(kind='repair')`，在 Planner 与回复上下文中提示“先承认感受再修复”。
-- 用户随后给出正面表达时自动结案；超过 `repair_ttl_hours` 自动失效；不改变关系阶段。
-
-**边界**：同步幅度远小于用户；不把不健康互动浪漫化；提供关闭开关。
-
----
-
-## 参考
-
-- Aron, A., Melinat, E., Aron, E. N., Vallone, R. D., & Bator, R. J. (1997). The experimental generation of interpersonal closeness. *Personality and Social Psychology Bulletin*, 23(4), 363–370.
-- Collins, N. L., & Miller, L. C. (1994). Self-disclosure and liking: A meta-analytic review. *Psychological Bulletin*, 116(3), 457–475.
-- Gottman, J. M. (1994). *Why Marriages Succeed or Fail*. Simon & Schuster.
-- Hatfield, E., Cacioppo, J. T., & Rapson, R. L. (1993). Emotional contagion. *Current Directions in Psychological Science*, 2(3), 96–99.
-- Laurenceau, J.-P., Barrett, L. F., & Pietromonaco, P. R. (1998). Intimacy as an interpersonal process. *Journal of Personality and Social Psychology*, 74(5), 1238–1251.
-- Reis, H. T., & Shaver, P. (1988). Intimacy as an interpersonal process. In *Handbook of Personal Relationships*.
+- 不模拟嫉妒、冷暴力、情绪勒索或"你不理我"式施压。
+- 不编造紧急事件或虚假记忆来制造话题。
+- 缺席与重逢只表达角色自己的状态，不评价用户。
+- 所有幅度有上限，并提供关闭开关；生人几乎不触发。

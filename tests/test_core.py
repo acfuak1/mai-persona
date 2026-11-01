@@ -37,9 +37,18 @@ from mai_persona.engine_life import validate_life_result
 from mai_persona.engine_relationship import validate_transition
 from mai_persona.engine_humanlike import (
     carry_over_scale,
+    closeness,
+    detect_boundary,
     detect_friction,
+    detect_peak,
     disclosure_depth,
     disclosure_hint,
+    drain_energy,
+    grudge_decay,
+    recover_energy,
+    scale_by_closeness,
+    style_hint,
+    update_style_stats,
 )
 from mai_persona.engine_schedule import (
     hard_guard,
@@ -112,6 +121,34 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(carry_over_scale(1000, 2000), 2.5)
         self.assertEqual(carry_over_scale(3000, 2000), 1.0)
         self.assertEqual(carry_over_scale(3000, 0), 1.0)
+
+    def test_closeness_scales_humanlike_effects(self) -> None:
+        stages = ["陌生", "熟悉", "朋友", "亲密"]
+        stranger = closeness("陌生", stages, {"trust": -0.5, "intimacy": -0.5, "rapport": -0.5})
+        close = closeness("亲密", stages, {"trust": 0.6, "intimacy": 0.5, "rapport": 0.4})
+        self.assertLess(stranger, 0.2)
+        self.assertGreater(close, 0.8)
+        self.assertLess(scale_by_closeness(0.08, stranger), scale_by_closeness(0.08, close))
+        self.assertAlmostEqual(scale_by_closeness(0.1, 0.0), 0.01)
+
+    def test_style_stats_and_hints(self) -> None:
+        median, samples = update_style_stats(0.0, 0, 7)
+        self.assertEqual((median, samples), (7.0, 1))
+        median, _ = update_style_stats(7.0, 1, 13)
+        self.assertAlmostEqual(median, 8.2)
+        self.assertEqual(style_hint(8, 10, 20, 1.0), "")
+        self.assertIn("一句话", style_hint(8, 20, 20, 0.9))
+        self.assertIn("一两句", style_hint(20, 20, 20, 0.9))
+        self.assertEqual(style_hint(8, 20, 20, 0.0), "")
+
+    def test_humanlike_detectors_and_decay(self) -> None:
+        self.assertTrue(detect_boundary("这个不想说，换个话题"))
+        self.assertFalse(detect_boundary("今天天气不错"))
+        self.assertTrue(detect_peak("我面试通过了，太开心了"))
+        self.assertFalse(detect_peak("开心"))
+        self.assertLess(grudge_decay(0.3, 3 * 86400, 3.0), 0.12)
+        self.assertEqual(recover_energy(0.0, 10**9, 8), 1.0)
+        self.assertAlmostEqual(drain_energy(0.5, 0.02), 0.48)
 
     def test_chat_end_user_filter_modes(self) -> None:
         self.assertTrue(user_filter_allows("off", "u1", ["u1"], ["u1"]))
@@ -330,6 +367,39 @@ class DomainTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_humanlike_storage_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = PersonaStore(Path(temp) / "persona.db")
+            try:
+                store.upsert_user_style("u1", 12.0, 21, 1000)
+                self.assertEqual(store.user_style("u1")["samples"], 21)
+
+                store.add_boundary("u1", "家庭", "不想说家里的事", 1000)
+                self.assertEqual(len(store.active_boundaries("u1", 1000, 30)), 1)
+                self.assertEqual(store.active_boundaries("u1", 1000 + 31 * 86400, 30), [])
+
+                store.add_absence(
+                    "u1", "away", 1000, 1000 + 72 * 3600, 1000 + 72 * 3600, "出差三天", 1000
+                )
+                self.assertIsNotNone(store.current_absence("u1", 2000))
+                self.assertIsNotNone(store.upcoming_absence("u1", 900))
+                self.assertEqual(store.mark_absence_returned("u1", 2000), 1)
+                self.assertIsNone(store.current_absence("u1", 2000))
+
+                store.bump_grudge("u1", 0.5, "吵架", 1000, 0.3)
+                self.assertAlmostEqual(store.get_grudge("u1")["value"], 0.3)
+                store.set_grudge("u1", 0.0, 2000)
+                self.assertEqual(store.get_grudge("u1")["value"], 0.0)
+
+                store.add_peak("u1", "面试通过", "我面试通过了", 0.8, 1000)
+                self.assertIsNotNone(store.pick_peak("u1", 1000 + 3 * 86400, 5))
+                self.assertIsNone(store.pick_peak("u1", 1000 + 3 * 86400, 5))
+
+                summary = store.humanlike_summary()
+                self.assertEqual(summary["peaks"], 1)
+            finally:
+                store.close()
+
     def test_relationship_events_dedupe_resolve_and_expire(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = PersonaStore(Path(temp) / "persona.db")
@@ -944,6 +1014,83 @@ class PluginContractTests(unittest.TestCase):
                         "跟进事项",
                         plugin._planner_context(plugin._now() + timedelta(hours=7), "u1"),
                     )
+                finally:
+                    plugin._store = None
+                    store.close()
+        finally:
+            sys.modules.pop(module_name, None)
+
+    def test_absence_holds_followup_and_shows_in_snapshot(self) -> None:
+        module_name = "mai_persona_absence_test"
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            PLUGIN_ROOT / "plugin.py",
+            submodule_search_locations=[str(PLUGIN_ROOT)],
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            with tempfile.TemporaryDirectory() as temp:
+                plugin = module.create_plugin()
+                plugin.set_plugin_config(
+                    {"plugin": {"enabled": True, "config_version": "1.0.0"}}
+                )
+                plugin._set_context(
+                    types.SimpleNamespace(api=Mock(), logger=Mock(spec=logging.Logger))
+                )
+                store = PersonaStore(Path(temp) / "persona.db")
+                plugin._store = store
+                try:
+                    now = plugin._now()
+                    store.initialize_emotion(PAD(0.0, 0.0, 0.0), now.timestamp())
+                    payload = {
+                        "known_user_ids": ["u1"],
+                        "messages": [{"user_id": "u1", "content": "明天出差三天"}],
+                        "max_due_hours": 72,
+                    }
+                    applied = asyncio.run(
+                        plugin._apply_planner_work(
+                            {"task_type": "followup_extract", "payload": payload},
+                            {
+                                "followups": [
+                                    {
+                                        "user_id": "u1",
+                                        "summary": "出差是否顺利",
+                                        "due_in_hours": 6,
+                                        "source": "明天出差三天",
+                                    }
+                                ],
+                                "absences": [
+                                    {
+                                        "user_id": "u1",
+                                        "kind": "away",
+                                        "start_in_hours": 24,
+                                        "duration_hours": 72,
+                                        "source": "明天出差三天",
+                                    }
+                                ],
+                            },
+                            now,
+                        )
+                    )
+                    self.assertTrue(applied)
+                    absence = store.upcoming_absence("u1", now.timestamp())
+                    self.assertIsNotNone(absence)
+                    self.assertEqual(absence["kind"], "away")
+                    events = store.fetchall(
+                        "SELECT * FROM relationship_events WHERE kind='followup'"
+                    )
+                    self.assertGreater(
+                        float(events[0]["due_at"]), float(absence["expected_return_at"])
+                    )
+
+                    snapshot = asyncio.run(plugin.webui_snapshot())
+                    self.assertIn("humanlike_energy", snapshot)
+                    self.assertEqual(snapshot["humanlike_followups"], "1")
+                    self.assertEqual(snapshot["humanlike_absence"], "计划缺席中")
                 finally:
                     plugin._store = None
                     store.close()

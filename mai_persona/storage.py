@@ -105,6 +105,31 @@ CREATE TABLE IF NOT EXISTS relationship_events (
 );
 CREATE INDEX IF NOT EXISTS idx_relationship_events_pending
     ON relationship_events(kind, status, due_at);
+CREATE TABLE IF NOT EXISTS user_style (
+    user_id TEXT PRIMARY KEY, median_len REAL NOT NULL DEFAULT 0,
+    samples INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS boundaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+    topic TEXT NOT NULL, source TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
+);
+CREATE TABLE IF NOT EXISTS absences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+    stream_id TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, start_at REAL NOT NULL,
+    end_at REAL, expected_return_at REAL, source TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'planned', created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS grudges (
+    user_id TEXT PRIMARY KEY, value REAL NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_peaks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+    summary TEXT NOT NULL, source TEXT NOT NULL DEFAULT '',
+    intensity REAL NOT NULL DEFAULT 0.5, created_at REAL NOT NULL, last_used_at REAL
+);
 """
 
 
@@ -583,6 +608,195 @@ class PersonaStore:
         )
         return len(rows)
 
+    def user_style(self, user_id: str) -> dict[str, Any] | None:
+        return self.fetchone("SELECT * FROM user_style WHERE user_id=?", (user_id,))
+
+    def upsert_user_style(self, user_id: str, median_len: float, samples: int, now: float) -> None:
+        self.execute(
+            "INSERT INTO user_style(user_id, median_len, samples, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET median_len=excluded.median_len, "
+            "samples=excluded.samples, updated_at=excluded.updated_at",
+            (user_id, float(median_len), int(samples), now),
+        )
+
+    def add_boundary(self, user_id: str, topic: str, source: str, now: float) -> int:
+        text = str(topic or "").strip()[:200]
+        if not text:
+            return 0
+        existing = self.fetchone(
+            "SELECT id FROM boundaries WHERE user_id=? AND topic=? AND status='active'",
+            (user_id, text),
+        )
+        if existing is not None:
+            self.execute("UPDATE boundaries SET updated_at=? WHERE id=?", (now, int(existing["id"])))
+            return int(existing["id"])
+        return self.execute(
+            "INSERT INTO boundaries(user_id, topic, source, created_at, updated_at, status) "
+            "VALUES (?, ?, ?, ?, ?, 'active')",
+            (user_id, text, str(source or "")[:300], now, now),
+        )
+
+    def active_boundaries(
+        self,
+        user_id: str,
+        now: float,
+        ttl_days: float,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        cutoff = now - float(ttl_days) * 86400
+        self.execute(
+            "UPDATE boundaries SET status='expired' WHERE user_id=? AND status='active' AND updated_at < ?",
+            (user_id, cutoff),
+        )
+        return self.fetchall(
+            "SELECT * FROM boundaries WHERE user_id=? AND status='active' "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (user_id, max(1, min(int(limit), 10))),
+        )
+
+    def add_absence(
+        self,
+        user_id: str,
+        kind: str,
+        start_at: float,
+        end_at: float | None,
+        expected_return_at: float | None,
+        source: str,
+        now: float,
+        stream_id: str = "",
+    ) -> int:
+        return self.execute(
+            "INSERT INTO absences(user_id, stream_id, kind, start_at, end_at, expected_return_at, "
+            "source, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)",
+            (
+                user_id,
+                str(stream_id or ""),
+                str(kind or "away"),
+                float(start_at),
+                end_at,
+                expected_return_at,
+                str(source or "")[:300],
+                now,
+                now,
+            ),
+        )
+
+    def current_absence(self, user_id: str, now: float) -> dict[str, Any] | None:
+        row = self.fetchone(
+            "SELECT * FROM absences WHERE user_id=? AND status IN ('planned','active') "
+            "AND start_at<=? AND COALESCE(expected_return_at, end_at, start_at+7*86400)>=? "
+            "ORDER BY start_at DESC LIMIT 1",
+            (user_id, now, now),
+        )
+        if row is None:
+            return None
+        if row["status"] == "planned":
+            self.execute("UPDATE absences SET status='active', updated_at=? WHERE id=?", (now, int(row["id"])))
+        return row
+
+    def any_upcoming_absence(self, now: float) -> dict[str, Any] | None:
+        return self.fetchone(
+            "SELECT * FROM absences WHERE status IN ('planned','active') "
+            "AND COALESCE(expected_return_at, end_at, start_at+7*86400) >= ? "
+            "ORDER BY start_at LIMIT 1",
+            (now,),
+        )
+
+    def upcoming_absence(self, user_id: str, now: float) -> dict[str, Any] | None:
+        return self.fetchone(
+            "SELECT * FROM absences WHERE user_id=? AND status IN ('planned','active') "
+            "AND COALESCE(expected_return_at, end_at, start_at+7*86400) >= ? "
+            "ORDER BY start_at LIMIT 1",
+            (user_id, now),
+        )
+
+    def mark_absence_returned(self, user_id: str, now: float) -> int:
+        rows = self.fetchall(
+            "SELECT id FROM absences WHERE user_id=? AND status IN ('planned','active')",
+            (user_id,),
+        )
+        if not rows:
+            return 0
+        self.execute(
+            "UPDATE absences SET status='returned', updated_at=? "
+            "WHERE user_id=? AND status IN ('planned','active')",
+            (now, user_id),
+        )
+        return len(rows)
+
+    def get_grudge(self, user_id: str) -> dict[str, Any] | None:
+        return self.fetchone("SELECT * FROM grudges WHERE user_id=?", (user_id,))
+
+    def bump_grudge(self, user_id: str, delta: float, reason: str, now: float, cap: float) -> float:
+        row = self.get_grudge(user_id)
+        current = float(row["value"]) if row else 0.0
+        value = max(0.0, min(float(cap), current + float(delta)))
+        self.execute(
+            "INSERT INTO grudges(user_id, value, reason, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET value=excluded.value, reason=excluded.reason, "
+            "updated_at=excluded.updated_at",
+            (user_id, value, str(reason)[:200], now),
+        )
+        return value
+
+    def humanlike_summary(self) -> dict[str, int]:
+        """统计待跟进、修复提示、边界与记忆峰值的数量，供 WebUI 展示。"""
+
+        def count(sql: str) -> int:
+            row = self.fetchone(sql)
+            return int(row["n"]) if row else 0
+
+        return {
+            "followups": count(
+                "SELECT COUNT(*) n FROM relationship_events WHERE kind='followup' AND status='pending'"
+            ),
+            "repairs": count(
+                "SELECT COUNT(*) n FROM relationship_events WHERE kind='repair' AND status='pending'"
+            ),
+            "boundaries": count("SELECT COUNT(*) n FROM boundaries WHERE status='active'"),
+            "peaks": count("SELECT COUNT(*) n FROM memory_peaks"),
+        }
+
+    def users_last_interaction(self, limit: int = 5) -> list[dict[str, Any]]:
+        return self.fetchall(
+            "SELECT user_id, MAX(ts) AS last FROM interaction_queue "
+            "WHERE role='user' AND user_id<>'' GROUP BY user_id ORDER BY last DESC LIMIT ?",
+            (max(1, min(int(limit), 20)),),
+        )
+
+    def all_grudges(self) -> list[dict[str, Any]]:
+        return self.fetchall("SELECT * FROM grudges")
+    def set_grudge(self, user_id: str, value: float, now: float) -> None:
+        self.execute(
+            "UPDATE grudges SET value=?, updated_at=? WHERE user_id=?",
+            (max(0.0, float(value)), now, user_id),
+        )
+
+    def add_peak(self, user_id: str, summary: str, source: str, intensity: float, now: float) -> int:
+        return self.execute(
+            "INSERT INTO memory_peaks(user_id, summary, source, intensity, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (user_id, str(summary)[:200], str(source)[:300], float(intensity), now),
+        )
+
+    def pick_peak(
+        self,
+        user_id: str,
+        now: float,
+        cooldown_days: float,
+        min_age_days: float = 2.0,
+    ) -> dict[str, Any] | None:
+        row = self.fetchone(
+            "SELECT * FROM memory_peaks WHERE user_id=? AND created_at <= ? "
+            "AND (last_used_at IS NULL OR last_used_at <= ?) "
+            "ORDER BY intensity DESC, created_at DESC LIMIT 1",
+            (user_id, now - max(0.0, min_age_days) * 86400, now - float(cooldown_days) * 86400),
+        )
+        if row is None:
+            return None
+        self.execute("UPDATE memory_peaks SET last_used_at=? WHERE id=?", (now, int(row["id"])))
+        return row
+
     def relationship(self, user_id: str) -> dict[str, Any] | None:
         return self.fetchone("SELECT * FROM relationship WHERE user_id=?", (user_id,))
 
@@ -669,6 +883,10 @@ class PersonaStore:
 
     def get_schedule(self) -> dict[str, Any] | None:
         return self.fetchone("SELECT * FROM schedule WHERE id=1")
+
+    def postpone_schedule(self, fire_at: float) -> None:
+        self.execute("UPDATE schedule SET fire_at=? WHERE id=1", (float(fire_at),))
+
 
     def clear_schedule(self) -> None:
         self.execute("DELETE FROM schedule WHERE id=1")

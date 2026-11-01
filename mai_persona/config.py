@@ -590,6 +590,117 @@ class HumanlikeConfig(PluginConfigBase):
         step=1.0,
         group="修复",
     )
+    style_adaptation: bool = _ui_field(
+        "按对方说话长度收敛",
+        "统计对方平时的消息长度，样本足够后让回复更接近对方的节奏；越熟影响越明显。",
+        default=True,
+        group="风格",
+    )
+    style_min_samples: int = _ui_field(
+        "风格样本下限",
+        "对方至少要有多少条消息才开始按长度收敛。",
+        default=20,
+        ge=5,
+        le=200,
+        group="风格",
+    )
+    boundary_ttl_days: float = _ui_field(
+        "边界提醒保留天数",
+        "用户明确表示不想聊的话题，在这段时间内不再主动提起。",
+        default=30.0,
+        ge=1.0,
+        le=365.0,
+        group="边界",
+    )
+    absence_dip_hours: float = _ui_field(
+        "缺席多久开始轻微失落（小时）",
+        "超过这个时间没有互动且不是计划内缺席时，心境轻微下移；越熟影响越明显。",
+        default=72.0,
+        ge=6.0,
+        le=720.0,
+        group="缺席",
+    )
+    absence_dip: float = _ui_field(
+        "缺席失落幅度",
+        "单次缺席造成的心境下移上限，实际值会按亲密度缩放。",
+        default=0.06,
+        ge=0.0,
+        le=0.3,
+        step=0.01,
+        group="缺席",
+    )
+    reunion_boost: float = _ui_field(
+        "重逢回升幅度",
+        "长时间没联系后重新互动时的正向回升，实际值会按亲密度缩放。",
+        default=0.08,
+        ge=0.0,
+        le=0.3,
+        step=0.01,
+        group="缺席",
+    )
+    grudge_enabled: bool = _ui_field(
+        "启用遗怨累积",
+        "摩擦会留下短期余怒，影响语气与主动联系意愿；修复后会快速回落。",
+        default=True,
+        group="遗怨",
+    )
+    grudge_cap: float = _ui_field(
+        "遗怨上限",
+        "余怒的最大值；越熟影响越明显，生人几乎不累积。",
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        step=0.05,
+        group="遗怨",
+    )
+    grudge_tau_days: float = _ui_field(
+        "遗怨衰减天数",
+        "没有新摩擦时，余怒按这个时间尺度自然衰减。",
+        default=3.0,
+        ge=0.5,
+        le=30.0,
+        step=0.5,
+        group="遗怨",
+    )
+    energy_enabled: bool = _ui_field(
+        "启用表达能量",
+        "连续互动会消耗表达能量，休息后恢复；能量低时回复更短、更少主动开启话题。",
+        default=True,
+        group="能量",
+    )
+    energy_tau_hours: float = _ui_field(
+        "表达能量恢复时间（小时）",
+        "能量向满值恢复的时间尺度。",
+        default=8.0,
+        ge=1.0,
+        le=72.0,
+        step=1.0,
+        group="能量",
+    )
+    peak_enabled: bool = _ui_field(
+        "启用共同记忆峰值",
+        "记录对方明确表达的高兴大事，之后偶尔自然回指；只在关系较熟时生效。",
+        default=True,
+        group="记忆峰值",
+    )
+    peak_min_closeness: float = _ui_field(
+        "回指所需最低亲密度",
+        "亲密度低于此值时不会主动回指过去的细节，避免显得越界。",
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        step=0.05,
+        group="记忆峰值",
+    )
+    peak_cooldown_days: float = _ui_field(
+        "回指冷却天数",
+        "同一条记忆峰值再次被提起的最短间隔。",
+        default=5.0,
+        ge=1.0,
+        le=90.0,
+        step=1.0,
+        group="记忆峰值",
+    )
 
 
 class MaiPersonaConfig(PluginConfigBase):
