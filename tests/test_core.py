@@ -183,6 +183,8 @@ class DomainTests(unittest.TestCase):
         self.assertTrue(has_personal_marker("我最近在学吉他"))
         self.assertLess(explicit_emotion_delta("我今天不怎么开心").p, 0)
         self.assertLess(explicit_emotion_delta("我不是很开心").p, 0)
+        self.assertLess(explicit_emotion_delta("不怎么快乐").p, 0)
+        self.assertLess(explicit_emotion_delta("今天好累").p, 0)
         self.assertEqual(explicit_emotion_delta("我没有不开心").p, 0.0)
         self.assertTrue(
             looks_like_echo(
