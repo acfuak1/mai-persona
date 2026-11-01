@@ -15,6 +15,8 @@ goals = ""
 relationship_stages = []
 event_line_domains = []
 micro_event_domains = []
+# 开启后按关系阶段限制自我披露深度
+disclosure_depth_gating = true
 
 [emotion]
 trait_p = 0.0
@@ -59,3 +61,15 @@ diary_generate_at = "23:30"
 
 [exposure]
 daily_limit = 2
+
+[humanlike]
+# 从用户发言里整理值得之后关心一次的事项
+followup_enabled = true
+followup_extract_hours = 6.0
+followup_window_hours = 24.0
+followup_ttl_hours = 72.0
+# 负面情绪后让角色情绪回落得更慢
+emotion_carry_over_hours = 2.0
+# 检测到摩擦时提示先修复
+repair_enabled = true
+repair_ttl_hours = 24.0

@@ -97,6 +97,14 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
     stream_id TEXT NOT NULL, content TEXT NOT NULL, reason TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_messages_ts ON outbound_messages(ts);
+CREATE TABLE IF NOT EXISTS relationship_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL, user_id TEXT NOT NULL, stream_id TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', due_at REAL,
+    status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, resolved_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_relationship_events_pending
+    ON relationship_events(kind, status, due_at);
 """
 
 
@@ -492,6 +500,88 @@ class PersonaStore:
             (user_id, since, max(1, min(int(limit), 50))),
         )
         return [str(row["content"]).strip() for row in reversed(rows) if str(row["content"]).strip()]
+
+    def add_relationship_event(
+        self,
+        kind: str,
+        user_id: str,
+        summary: str,
+        *,
+        now: float,
+        stream_id: str = "",
+        source: str = "",
+        due_at: float | None = None,
+    ) -> int:
+        """登记一条待处理的跟进或修复事项；同用户同摘要的未处理事项会复用。"""
+
+        text = str(summary or "").strip()[:300]
+        if not kind or not user_id or not text:
+            return 0
+        existing = self.fetchone(
+            "SELECT id FROM relationship_events WHERE kind=? AND user_id=? AND summary=? AND status='pending'",
+            (kind, user_id, text),
+        )
+        if existing is not None:
+            return int(existing["id"])
+        return self.execute(
+            "INSERT INTO relationship_events(kind, user_id, stream_id, summary, source, due_at, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+            (kind, user_id, str(stream_id or ""), text, str(source or "")[:500], due_at, now),
+        )
+
+    def pending_relationship_events(
+        self,
+        kind: str,
+        now: float,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        return self.fetchall(
+            "SELECT * FROM relationship_events WHERE kind=? AND status='pending' "
+            "AND (due_at IS NULL OR due_at<=?) ORDER BY COALESCE(due_at, created_at) LIMIT ?",
+            (kind, now, max(1, min(int(limit), 20))),
+        )
+
+    def resolve_relationship_event(self, event_id: int, now: float) -> bool:
+        row = self.fetchone(
+            "SELECT id FROM relationship_events WHERE id=? AND status='pending'",
+            (int(event_id),),
+        )
+        if row is None:
+            return False
+        self.execute(
+            "UPDATE relationship_events SET status='resolved', resolved_at=? WHERE id=?",
+            (now, int(event_id)),
+        )
+        return True
+
+    def resolve_user_events(self, kind: str, user_id: str, now: float) -> int:
+        rows = self.fetchall(
+            "SELECT id FROM relationship_events WHERE kind=? AND user_id=? AND status='pending'",
+            (kind, user_id),
+        )
+        if not rows:
+            return 0
+        self.execute(
+            "UPDATE relationship_events SET status='resolved', resolved_at=? "
+            "WHERE kind=? AND user_id=? AND status='pending'",
+            (now, kind, user_id),
+        )
+        return len(rows)
+
+    def expire_relationship_events(self, kind: str, now: float, ttl_hours: float) -> int:
+        rows = self.fetchall(
+            "SELECT id FROM relationship_events WHERE kind=? AND status='pending' "
+            "AND COALESCE(due_at, created_at) < ?",
+            (kind, now - float(ttl_hours) * 3600),
+        )
+        if not rows:
+            return 0
+        self.execute(
+            "UPDATE relationship_events SET status='expired' WHERE kind=? AND status='pending' "
+            "AND COALESCE(due_at, created_at) < ?",
+            (kind, now - float(ttl_hours) * 3600),
+        )
+        return len(rows)
 
     def relationship(self, user_id: str) -> dict[str, Any] | None:
         return self.fetchone("SELECT * FROM relationship WHERE user_id=?", (user_id,))

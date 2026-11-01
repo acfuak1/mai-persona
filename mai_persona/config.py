@@ -509,6 +509,13 @@ class PersonaConfig(PluginConfigBase):
         hint="每项填写一个方向。例如：休息与饮食、阅读和散步。",
         group="状态与生活模拟",
     )
+    disclosure_depth_gating: bool = _ui_field(
+        "按关系阶段限制自我披露深度",
+        "开启后，角色愿意谈多深由当前关系阶段决定：第一阶段只聊表层，第二阶段可谈个人经历，第三阶段起才会说出私密感受。",
+        default=True,
+        hint="关闭后不再按阶段收敛，角色按人格设定自由表达。",
+        group="状态与生活模拟",
+    )
 
     @field_validator("relationship_stages")
     @classmethod
@@ -517,6 +524,72 @@ class PersonaConfig(PluginConfigBase):
         if len(normalized) != len(set(normalized)):
             raise ValueError("关系阶段不能重复")
         return normalized
+
+
+class HumanlikeConfig(PluginConfigBase):
+    """拟人细节：跟进事项、情绪残留与冲突修复。"""
+
+    __ui_label__ = "拟人细节"
+    __ui_icon__ = "favorite"
+    __ui_order__ = 8
+
+    followup_enabled: bool = _ui_field(
+        "启用跟进事项",
+        "开启后，插件会定期从用户发言里找出值得之后自然关心一次的具体事项（结果待定的事、即将发生的事、身体状况等），到期后提示 Planner 择机提起。",
+        default=True,
+        group="跟进",
+    )
+    followup_extract_hours: float = _ui_field(
+        "跟进事项整理间隔（小时）",
+        "多久整理一次近期发言；整理任务会排入 Planner 队列。",
+        default=6.0,
+        ge=0.5,
+        le=168.0,
+        step=0.5,
+        group="跟进",
+    )
+    followup_window_hours: float = _ui_field(
+        "跟进事项回看时长（小时）",
+        "整理时只看这段时间内的用户发言。",
+        default=24.0,
+        ge=1.0,
+        le=168.0,
+        step=1.0,
+        group="跟进",
+    )
+    followup_ttl_hours: float = _ui_field(
+        "跟进事项保留时长（小时）",
+        "超过这个时间仍未跟进的条目会自动失效，避免翻旧账。",
+        default=72.0,
+        ge=1.0,
+        le=720.0,
+        step=1.0,
+        group="跟进",
+    )
+    emotion_carry_over_hours: float = _ui_field(
+        "情绪残留时长（小时）",
+        "用户明确表达负面情绪后，角色情绪在这段时间内回落得更慢，避免立刻恢复平静。",
+        default=2.0,
+        ge=0.0,
+        le=24.0,
+        step=0.5,
+        group="情绪",
+    )
+    repair_enabled: bool = _ui_field(
+        "启用冲突修复提示",
+        "检测到指责、冷淡或对抗意味的发言时，提示回复侧先温和修复，而不是辩解或直接转移话题。",
+        default=True,
+        group="修复",
+    )
+    repair_ttl_hours: float = _ui_field(
+        "修复提示保留时长（小时）",
+        "超过这个时间仍未化解的摩擦提示会自动失效。",
+        default=24.0,
+        ge=1.0,
+        le=168.0,
+        step=1.0,
+        group="修复",
+    )
 
 
 class MaiPersonaConfig(PluginConfigBase):
@@ -530,6 +603,7 @@ class MaiPersonaConfig(PluginConfigBase):
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     batch: BatchConfig = Field(default_factory=BatchConfig)
     exposure: ExposureConfig = Field(default_factory=ExposureConfig)
+    humanlike: HumanlikeConfig = Field(default_factory=HumanlikeConfig)
 
     @model_validator(mode="before")
     @classmethod

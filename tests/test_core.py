@@ -35,6 +35,12 @@ from mai_persona.engine_emotion import (
 )
 from mai_persona.engine_life import validate_life_result
 from mai_persona.engine_relationship import validate_transition
+from mai_persona.engine_humanlike import (
+    carry_over_scale,
+    detect_friction,
+    disclosure_depth,
+    disclosure_hint,
+)
 from mai_persona.engine_schedule import (
     hard_guard,
     is_conversation_end,
@@ -90,6 +96,22 @@ class DomainTests(unittest.TestCase):
         self.assertFalse(is_conversation_end("这个价格是 88"))
         self.assertFalse(is_conversation_end(""))
         self.assertFalse(is_conversation_end(None))
+
+    def test_humanlike_signals(self) -> None:
+        stages = ["陌生", "熟悉", "朋友", "亲密"]
+        self.assertEqual(disclosure_depth("陌生", stages), 0)
+        self.assertEqual(disclosure_depth("熟悉", stages), 1)
+        self.assertEqual(disclosure_depth("朋友", stages), 2)
+        self.assertEqual(disclosure_depth("亲密", stages), 2)
+        self.assertEqual(disclosure_depth("未知", stages), 0)
+        self.assertEqual(disclosure_depth("陌生", stages, enabled=False), 2)
+        self.assertIn("表层", disclosure_hint(0))
+        self.assertIn("私密", disclosure_hint(2))
+        self.assertTrue(detect_friction("你根本不想听我说话"))
+        self.assertFalse(detect_friction("今天路上有点堵"))
+        self.assertEqual(carry_over_scale(1000, 2000), 2.5)
+        self.assertEqual(carry_over_scale(3000, 2000), 1.0)
+        self.assertEqual(carry_over_scale(3000, 0), 1.0)
 
     def test_chat_end_user_filter_modes(self) -> None:
         self.assertTrue(user_filter_allows("off", "u1", ["u1"], ["u1"]))
@@ -308,6 +330,27 @@ class DomainTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_relationship_events_dedupe_resolve_and_expire(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = PersonaStore(Path(temp) / "persona.db")
+            try:
+                first = store.add_relationship_event("followup", "u1", "周五面试结果", now=1000, due_at=2000)
+                again = store.add_relationship_event("followup", "u1", "周五面试结果", now=1001, due_at=2100)
+                self.assertEqual(first, again)
+                self.assertEqual(store.pending_relationship_events("followup", 1999), [])
+                self.assertEqual(len(store.pending_relationship_events("followup", 2000)), 1)
+                self.assertTrue(store.resolve_relationship_event(first, 2100))
+                self.assertEqual(store.pending_relationship_events("followup", 3000), [])
+
+                repair = store.add_relationship_event("repair", "u1", "摩擦", now=3000, due_at=3000)
+                self.assertEqual(store.resolve_user_events("repair", "u1", 3100), 1)
+                later = store.add_relationship_event("repair", "u1", "摩擦", now=4000, due_at=4000)
+                self.assertNotEqual(repair, later)
+                self.assertEqual(store.expire_relationship_events("repair", 4000 + 25 * 3600, 24), 1)
+                self.assertEqual(store.pending_relationship_events("repair", 4000 + 25 * 3600), [])
+            finally:
+                store.close()
+
     def test_recent_interactions_returns_chronological_window(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = PersonaStore(Path(temp) / "persona.db")
@@ -810,6 +853,100 @@ class PluginContractTests(unittest.TestCase):
             self.assertIn("webui_snapshot", api_names)
             query_names = {query["api"] for query in webui["pages"][0]["queries"].values()}
             self.assertLessEqual(query_names, api_names)
+        finally:
+            sys.modules.pop(module_name, None)
+
+    def test_humanlike_followup_and_repair_flow(self) -> None:
+        module_name = "mai_persona_humanlike_flow_test"
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            PLUGIN_ROOT / "plugin.py",
+            submodule_search_locations=[str(PLUGIN_ROOT)],
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            with tempfile.TemporaryDirectory() as temp:
+                plugin = module.create_plugin()
+                plugin.set_plugin_config(
+                    {"plugin": {"enabled": True, "config_version": "1.0.0"}}
+                )
+                plugin._set_context(
+                    types.SimpleNamespace(api=Mock(), logger=Mock(spec=logging.Logger))
+                )
+                store = PersonaStore(Path(temp) / "persona.db")
+                plugin._store = store
+                try:
+                    now = plugin._now()
+                    base = now.timestamp() - 120
+
+                    def record(text: str, message_id: str, offset: int) -> None:
+                        plugin._record_user_message(
+                            user_id="u1",
+                            session_id="s1",
+                            stream_id="s1",
+                            text=text,
+                            timestamp=base + offset,
+                            message_id=message_id,
+                        )
+
+                    record("你根本不想听我说话", "m1", 0)
+                    repairs = store.pending_relationship_events("repair", now.timestamp())
+                    self.assertEqual(len(repairs), 1)
+
+                    record("今天挺开心的", "m2", 30)
+                    self.assertEqual(
+                        store.pending_relationship_events("repair", now.timestamp()), []
+                    )
+
+                    record("我有点难过", "m3", 60)
+                    self.assertGreater(
+                        float(store.get_meta("carry_over_until", "0") or 0),
+                        base + 60,
+                    )
+
+                    payload = {
+                        "known_user_ids": ["u1"],
+                        "messages": [{"user_id": "u1", "content": "周五要面试"}],
+                        "max_due_hours": 72,
+                    }
+                    applied = asyncio.run(
+                        plugin._apply_planner_work(
+                            {"task_type": "followup_extract", "payload": payload},
+                            {
+                                "followups": [
+                                    {
+                                        "user_id": "u1",
+                                        "summary": "周五面试结果",
+                                        "due_in_hours": 6,
+                                        "source": "周五要面试",
+                                    },
+                                    {
+                                        "user_id": "u1",
+                                        "summary": "编造的事项",
+                                        "due_in_hours": 6,
+                                        "source": "不存在的原句",
+                                    },
+                                ]
+                            },
+                            plugin._now(),
+                        )
+                    )
+                    self.assertTrue(applied)
+                    events = store.pending_relationship_events(
+                        "followup", now.timestamp() + 7 * 3600
+                    )
+                    self.assertEqual([item["summary"] for item in events], ["周五面试结果"])
+                    self.assertIn(
+                        "跟进事项",
+                        plugin._planner_context(plugin._now() + timedelta(hours=7), "u1"),
+                    )
+                finally:
+                    plugin._store = None
+                    store.close()
         finally:
             sys.modules.pop(module_name, None)
 

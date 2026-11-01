@@ -36,6 +36,12 @@ from .mai_persona.engine_emotion import (
     style_hint,
 )
 from .mai_persona.engine_events import apply_advances
+from .mai_persona.engine_humanlike import (
+    carry_over_scale,
+    detect_friction,
+    disclosure_depth,
+    disclosure_hint,
+)
 from .mai_persona.engine_life import slots_elapsed, validate_life_result
 from .mai_persona.maitrace_schedule import (
     activity_name,
@@ -247,6 +253,20 @@ class MaiPersonaPlugin(MaiBotPlugin):
                     for work in pending_work
                 )
                 + "。请在本轮 Planner 中优先读取并完成这些任务；维护过程不要作为话题告诉用户。"
+            )
+        followups = store.pending_relationship_events("followup", now.timestamp(), limit=2)
+        if followups:
+            pending_summary += (
+                "\\n可择机自然提起的跟进事项（不要连续追问，也不要为了跟进而硬转话题；"
+                "已自然问到可调用 resolve_persona_event 标记）："
+                + "；".join(f"#{int(item['id'])} {item['summary']}" for item in followups)
+            )
+        repairs = store.pending_relationship_events("repair", now.timestamp(), limit=1)
+        if repairs:
+            pending_summary += (
+                "\\n上一轮对话出现不快："
+                + str(repairs[0]["summary"])[:120]
+                + "。如果合适，先承认对方的感受再温和修复，不要辩解或直接转移话题。"
             )
         return (
             "[Mai Persona 角色设定]\n"
@@ -471,6 +491,42 @@ class MaiPersonaPlugin(MaiBotPlugin):
             self.ctx.logger.info("Planner 完成好感评估：有依据的用户变更 %d 个", changed)
             return True
 
+        if task_type == "followup_extract":
+            if not isinstance(result, dict) or not isinstance(result.get("followups"), list):
+                return False
+            allowed_users = {str(item) for item in payload.get("known_user_ids", [])}
+            known_sources = {
+                str(item.get("content", ""))
+                for item in payload.get("messages", [])
+                if isinstance(item, dict)
+            }
+            max_due = float(payload.get("max_due_hours", 72) or 72)
+            added = 0
+            for item in result["followups"][:10]:
+                if not isinstance(item, dict):
+                    continue
+                user_id = str(item.get("user_id", "")).strip()
+                summary = str(item.get("summary", "")).strip()
+                source = str(item.get("source", "")).strip()
+                if user_id not in allowed_users or not summary or source not in known_sources:
+                    continue
+                try:
+                    due_hours = float(item.get("due_in_hours", 12))
+                except (TypeError, ValueError):
+                    due_hours = 12.0
+                due_hours = max(1.0, min(due_hours, max_due))
+                store.add_relationship_event(
+                    "followup",
+                    user_id,
+                    summary,
+                    now=now.timestamp(),
+                    source=source,
+                    due_at=now.timestamp() + due_hours * 3600,
+                )
+                added += 1
+            self.ctx.logger.info("Planner 完成跟进事项整理：新增 %d 条", added)
+            return True
+
         if task_type == "event_advance":
             if not isinstance(result, dict) or not isinstance(result.get("lines"), list):
                 return False
@@ -575,9 +631,10 @@ class MaiPersonaPlugin(MaiBotPlugin):
         self._maybe_refresh_maitrace_schedule(now)
         store = self._require_store()
         emotion_cfg = self.config.emotion
+        carry_until = float(store.get_meta("carry_over_until", "0") or 0.0)
         state = store.decay_emotion(
             now.timestamp(),
-            emotion_cfg.tau_emotion_min * 60,
+            emotion_cfg.tau_emotion_min * 60 * carry_over_scale(now.timestamp(), carry_until),
             emotion_cfg.tau_mood_hours * 3600,
         )
         if state:
@@ -926,8 +983,48 @@ class MaiPersonaPlugin(MaiBotPlugin):
 
     async def _run_daily_jobs(self, now: datetime) -> None:
         await self._run_affection_job(now)
+        await self._run_followup_job(now)
         await self._advance_event_lines_if_due(now)
         await self._generate_diary_if_due(now)
+
+    async def _run_followup_job(self, now: datetime) -> None:
+        config = self.config.humanlike
+        store = self._require_store()
+        store.expire_relationship_events("followup", now.timestamp(), config.followup_ttl_hours)
+        store.expire_relationship_events("repair", now.timestamp(), config.repair_ttl_hours)
+        if not config.followup_enabled:
+            return
+        last = float(store.get_meta("last_followup_extract_at", "0") or 0.0)
+        if now.timestamp() - last < config.followup_extract_hours * 3600:
+            return
+        since = now.timestamp() - config.followup_window_hours * 3600
+        users = store.active_users(since)[:10]
+        messages: list[dict[str, str]] = []
+        for user_id in users:
+            rows = store.fetchall(
+                "SELECT content FROM interaction_queue "
+                "WHERE user_id=? AND role='user' AND ts>=? ORDER BY ts DESC LIMIT 8",
+                (user_id, since),
+            )
+            for row in reversed(rows):
+                content = str(row["content"]).strip()
+                if content:
+                    messages.append({"user_id": user_id, "content": content[:300]})
+        store.set_meta("last_followup_extract_at", now.timestamp())
+        if not messages:
+            return
+        self._queue_planner_work(
+            "followup_extract",
+            "followup_extract",
+            {
+                "now": now.isoformat(),
+                "messages": messages,
+                "known_user_ids": users,
+                "max_due_hours": max(1, int(config.followup_ttl_hours)),
+            },
+            f"followup_extract:{int(now.timestamp())}",
+            now,
+        )
 
     async def _run_affection_job(self, now: datetime) -> None:
         if not self._is_time_due(now, self.config.affection.evaluate_daily_at):
@@ -1373,11 +1470,28 @@ class MaiPersonaPlugin(MaiBotPlugin):
         todos = state["todos"]
         if todos:
             text += f"\n近期待办线索：惦记着用户提到的「{todos[0]['content']}」。"
+        relation_stage = str((relation or {}).get("stage", ""))
+        depth = disclosure_depth(
+            relation_stage,
+            self.config.persona.relationship_stages,
+            self.config.persona.disclosure_depth_gating,
+        )
+        text += f"\n{disclosure_hint(depth)}"
+        store = self._require_store()
+        followups = store.pending_relationship_events("followup", now.timestamp(), limit=1)
+        if followups:
+            text += (
+                f"\n可以自然关心一句：「{str(followups[0]['summary'])[:80]}」"
+                "；只在话题合适时提起，不追问。"
+            )
+        repairs = store.pending_relationship_events("repair", now.timestamp(), limit=1)
+        if repairs:
+            text += "\n上一轮有不愉快：先承认感受再温和修复，不辩解、不转移话题。"
         text += (
             "\n这些状态不覆盖 MaiBot 自有人格、行为准则、回复风格或用户本轮明确任务；"
             "只用于让表达与角色当前状态保持一致。"
         )
-        return text[:1200]
+        return text[:1600]
 
     def _maybe_refresh_maitrace_schedule(self, now: datetime) -> None:
         if not self.config.batch.use_maitrace_schedule:
@@ -1611,7 +1725,36 @@ class MaiPersonaPlugin(MaiBotPlugin):
                     )
         elif is_new_interaction and interaction_id:
             self._apply_interaction_pulse(text, timestamp)
+        if is_new_interaction:
+            self._track_relationship_events(user_id, stream_id, text, timestamp)
         return interaction_id
+
+    def _track_relationship_events(
+        self,
+        user_id: str,
+        stream_id: str,
+        text: str,
+        timestamp: float,
+    ) -> None:
+        """记录情绪残留、摩擦修复提示；正面表达到达时结案。"""
+
+        config = self.config.humanlike
+        store = self._require_store()
+        delta = explicit_emotion_delta(text, self.config.emotion.max_delta_per_event)
+        if (delta.p < 0 or delta.a > 0 and delta.p <= 0) and config.emotion_carry_over_hours > 0:
+            store.set_meta("carry_over_until", timestamp + config.emotion_carry_over_hours * 3600)
+        if config.repair_enabled and detect_friction(text):
+            store.add_relationship_event(
+                "repair",
+                user_id,
+                text[:120],
+                now=timestamp,
+                stream_id=stream_id,
+                source=text[:300],
+                due_at=timestamp,
+            )
+        elif delta.p > 0:
+            store.resolve_user_events("repair", user_id, timestamp)
 
     def _apply_immediate_emotion_seed(self, text: str, timestamp: float) -> bool:
         """先把明确情绪变成小幅即时状态，避免必须等待 Planner 才首次变化。"""
@@ -1817,6 +1960,28 @@ class MaiPersonaPlugin(MaiBotPlugin):
             self._maybe_decide_after_private_chat_end(session_id, context, response)
         if session_id:
             self._session_context.pop(session_id, None)
+
+    @Tool(
+        "resolve_persona_event",
+        description="把一条跟进或修复事项标记为已处理；仅在已经自然提起或完成修复后调用",
+        parameters=[
+            ToolParameterInfo(
+                name="event_id",
+                param_type=ToolParamType.INTEGER,
+                description="上下文里以 # 开头的事项编号",
+                required=True,
+            )
+        ],
+    )
+    async def resolve_persona_event(self, event_id: int, **kwargs: Any) -> dict[str, str]:
+        del kwargs
+        if not self._active():
+            return {"name": "resolve_persona_event", "content": "Mai Persona 当前未启用"}
+        resolved = self._require_store().resolve_relationship_event(int(event_id), self._now().timestamp())
+        return {
+            "name": "resolve_persona_event",
+            "content": "已标记为处理完成" if resolved else "事项不存在或已处理",
+        }
 
     @Tool(
         "get_inner_state",
