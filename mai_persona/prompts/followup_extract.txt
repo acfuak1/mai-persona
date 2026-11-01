@@ -1,19 +1,23 @@
 {{persona}}
 
-从输入里最近的用户发言中，找出两类信息，只记录能逐字对应到输入的内容：
+从输入里最近的用户发言中，找出四类信息，只记录能逐字对应到输入的内容：
 
-1) 值得在之后自然关心一次的具体事项：即将发生的事、结果待定的事、身体或情绪状况、重要计划。
+1) 值得在之后自然关心一次的具体事项：即将发生的事、结果待定的事、身体状况、重要计划。
 2) 用户明确说出的计划内缺席：出差、旅行、考试、项目封闭、几天不方便回复等。
+3) 用户明确划出的谈话边界：说了不想聊、别问、换个话题时，它所指向的**话题**是什么。
+4) 聊到一半还没聊完的话题（开放话题）：提出了但没聊透、或说“回头再说”的具体主题。
 
 每条都必须用 source 原样引用输入中的某一句；引用不到就不要输出。没有就返回空数组。
 due_in_hours 表示多少小时后适合提起，取 2 到 max_due_hours 之间的整数，不确定时用 12。
 start_in_hours 表示缺席大约多少小时后开始，0 表示已经开始。
 duration_hours 表示缺席预计持续多少小时；用户没说清楚就填 0。
 kind 只能是 away、busy、low_availability。
+boundary 的 topic 要写具体话题（例如“家里的事”“前任”），不要照抄“这个不想说”这类请求句。
+threads 的 topic 也写具体主题，不要写“再聊”这种空话。
 
 只返回严格 JSON，不添加解释。
 
 输出结构：
-{"followups":[{"user_id":"输入中的用户 ID","summary":"一句话说明要关心什么","due_in_hours":12,"source":"逐字引用的原句"}],"absences":[{"user_id":"输入中的用户 ID","kind":"away","start_in_hours":12,"duration_hours":72,"source":"逐字引用的原句"}]}
+{"followups":[{"user_id":"输入中的用户 ID","summary":"一句话说明要关心什么","due_in_hours":12,"source":"逐字引用的原句"}],"absences":[{"user_id":"输入中的用户 ID","kind":"away","start_in_hours":12,"duration_hours":72,"source":"逐字引用的原句"}],"boundaries":[{"user_id":"输入中的用户 ID","topic":"具体话题","source":"逐字引用的原句"}],"threads":[{"user_id":"输入中的用户 ID","topic":"具体话题","source":"逐字引用的原句"}]}
 
 输入：{{input}}

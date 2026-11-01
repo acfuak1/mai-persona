@@ -110,6 +110,15 @@ class PluginOptions(PluginConfigBase):
         step=1,
         order=4,
     )
+    work_ttl_hours: float = _ui_field(
+        "维护任务保留时长（小时）",
+        "长时间没有被 Planner 处理的维护任务会被丢弃，避免队列无限堆积。",
+        default=72.0,
+        ge=6.0,
+        le=720.0,
+        step=6.0,
+        order=5,
+    )
 
 
 class EmotionConfig(PluginConfigBase):
@@ -629,6 +638,15 @@ class HumanlikeConfig(PluginConfigBase):
         step=0.01,
         group="缺席",
     )
+    absence_dip_daily_cap: float = _ui_field(
+        "每日缺席失落总上限",
+        "无论有多少用户同时失联，一天内因缺席造成的心境下移总量不超过此值，避免莫名消沉。",
+        default=0.08,
+        ge=0.0,
+        le=0.3,
+        step=0.01,
+        group="缺席",
+    )
     reunion_boost: float = _ui_field(
         "重逢回升幅度",
         "长时间没联系后重新互动时的正向回升，实际值会按亲密度缩放。",
@@ -700,6 +718,128 @@ class HumanlikeConfig(PluginConfigBase):
         le=90.0,
         step=1.0,
         group="记忆峰值",
+    )
+    rhythm_enabled: bool = _ui_field(
+        "按对方节奏判断沉默",
+        "记录对方平时多久回一次，沉默阈值按“对方自己的节奏”放宽；慢回的人不会被当成冷淡。",
+        default=True,
+        group="回复节奏",
+    )
+    rhythm_factor: float = _ui_field(
+        "沉默阈值倍数",
+        "沉默多久算缺席 = max(缺席小时数, 对方平均回复间隔 × 此倍数)。",
+        default=3.0,
+        ge=1.0,
+        le=20.0,
+        step=0.5,
+        group="回复节奏",
+    )
+    repair_severity_scaling: bool = _ui_field(
+        "按摩擦严重度调整",
+        "轻微不满只轻描淡写，明显指责才正式修复；避免为玩笑道歉一整天。",
+        default=True,
+        group="修复",
+    )
+    repair_escalation: bool = _ui_field(
+        "修复后仍然低落时升级",
+        "修复提示出现后，对方如果仍然负面，会记录一次未化解并加重余怒。",
+        default=True,
+        group="修复",
+    )
+    boundary_notice_hours: float = _ui_field(
+        "边界提醒持续小时",
+        "被划界后，只在最初这段时间把话题提示给模型，之后静默避开，避免反复提起。",
+        default=24.0,
+        ge=1.0,
+        le=720.0,
+        step=1.0,
+        group="边界",
+    )
+    threads_enabled: bool = _ui_field(
+        "记录未聊完的话题",
+        "把聊到一半的话题记下来，之后只在与当前话题相关时提醒一次。",
+        default=True,
+        group="开放话题",
+    )
+    thread_ttl_days: float = _ui_field(
+        "开放话题保留天数",
+        "超过这个时间仍未续聊的话题自动关闭。",
+        default=14.0,
+        ge=1.0,
+        le=180.0,
+        step=1.0,
+        group="开放话题",
+    )
+    reciprocity_enabled: bool = _ui_field(
+        "提示披露互惠",
+        "对方分享得多、角色分享得少时，提醒一次双方的分享次数（只给事实）。",
+        default=True,
+        group="披露互惠",
+    )
+    reciprocity_gap: int = _ui_field(
+        "分享次数差阈值",
+        "对方比角色多分享多少次才提示。",
+        default=3,
+        ge=1,
+        le=50,
+        group="披露互惠",
+    )
+    ritual_enabled: bool = _ui_field(
+        "识别固定聊天时段",
+        "对方长期在某个时段聊天时，记录成“固定时段”，偶尔作为事实提示。",
+        default=True,
+        group="固定时段",
+    )
+    ritual_min_days: int = _ui_field(
+        "固定时段最少天数",
+        "同一时段至少出现过多少天才会被当成固定时段。",
+        default=5,
+        ge=2,
+        le=60,
+        group="固定时段",
+    )
+    ritual_cooldown_days: float = _ui_field(
+        "固定时段提示间隔（天）",
+        "同一条“固定时段”事实再次出现的最短间隔。",
+        default=7.0,
+        ge=1.0,
+        le=180.0,
+        step=1.0,
+        group="固定时段",
+    )
+    support_enabled: bool = _ui_field(
+        "识别倾诉状态",
+        "对方连续倾诉时，提示“还没提出具体问题”，避免这一轮急着给建议。",
+        default=True,
+        group="倾诉",
+    )
+    support_turns: int = _ui_field(
+        "倾诉状态持续条数",
+        "识别到倾诉后，这个提示持续多少条消息。",
+        default=2,
+        ge=1,
+        le=10,
+        group="倾诉",
+    )
+    uncertainty_hints: bool = _ui_field(
+        "标注推测信息",
+        "由时间词推测出的缺席会标注“按时间词推测”，让角色不要当成确定事实。",
+        default=True,
+        group="推测标注",
+    )
+    milestone_enabled: bool = _ui_field(
+        "记录认识天数",
+        "每满固定天数记录一次认识时长，偶尔作为事实提示。",
+        default=True,
+        group="里程碑",
+    )
+    milestone_every_days: int = _ui_field(
+        "里程碑间隔（天）",
+        "每多少天记录一次认识时长。",
+        default=30,
+        ge=1,
+        le=365,
+        group="里程碑",
     )
 
 

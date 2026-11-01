@@ -103,12 +103,12 @@ def emotion_label(pad: PAD) -> str:
 
 
 def style_hint(pad: PAD) -> str:
-    """将表达 PAD 转成简短的描述性提示。"""
+    """把表达 PAD 描述成状态词，不写成指令。"""
 
     hints: list[str] = []
-    hints.append("表达明亮、愿意分享" if pad.p >= 0.2 else "表达收敛、少作情绪渲染" if pad.p <= -0.2 else "保持自然")
-    hints.append("节奏轻快、句子短一些" if pad.a >= 0.25 else "节奏舒缓" if pad.a <= -0.25 else "语速平稳")
-    hints.append("可以主动带起话题" if pad.d >= 0.25 else "多倾听、少推动" if pad.d <= -0.25 else "交流保持平等")
+    hints.append("外放、愿意分享" if pad.p >= 0.2 else "收敛、少作渲染" if pad.p <= -0.2 else "中性")
+    hints.append("节奏偏快" if pad.a >= 0.25 else "节奏偏慢" if pad.a <= -0.25 else "节奏平稳")
+    hints.append("倾向主动" if pad.d >= 0.25 else "倾向倾听" if pad.d <= -0.25 else "平等")
     return "；".join(hints)
 
 

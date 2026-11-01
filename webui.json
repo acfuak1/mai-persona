@@ -129,6 +129,54 @@
         },
         {
           "type": "grid",
+          "columns": 2,
+          "children": [
+            {
+              "type": "text",
+              "label": "共同记忆峰值",
+              "value": {
+                "source": "snapshot",
+                "field": "humanlike_peaks"
+              }
+            },
+            {
+              "type": "text",
+              "label": "下一条跟进",
+              "value": {
+                "source": "snapshot",
+                "field": "humanlike_next_followup"
+              }
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "label": "今日提示采纳（用于/注入）",
+          "value": {
+            "source": "snapshot",
+            "field": "humanlike_hint_stats"
+          }
+        },
+        {
+          "type": "grid",
+          "columns": 3,
+          "children": [
+            {"type": "text", "label": "对方回复节奏", "value": {"source": "snapshot", "field": "humanlike_rhythm"}},
+            {"type": "text", "label": "开放话题", "value": {"source": "snapshot", "field": "humanlike_threads"}},
+            {"type": "text", "label": "固定时段", "value": {"source": "snapshot", "field": "humanlike_rituals"}}
+          ]
+        },
+        {
+          "type": "grid",
+          "columns": 3,
+          "children": [
+            {"type": "text", "label": "倾诉状态", "value": {"source": "snapshot", "field": "humanlike_support"}},
+            {"type": "text", "label": "认识天数提醒", "value": {"source": "snapshot", "field": "humanlike_milestone"}},
+            {"type": "text", "label": "分享次数（对方/角色）", "value": {"source": "snapshot", "field": "humanlike_disclosure"}}
+          ]
+        },
+        {
+          "type": "grid",
           "columns": 3,
           "children": [
             {
@@ -643,6 +691,94 @@
               },
               "format": "log"
             }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tuning",
+      "title": "拟人设置",
+      "placement": "sidebar",
+      "mode": "declarative",
+      "icon": "list",
+      "description": "调整拟人细节的幅度与节奏；生成片段后粘贴到 config.toml。",
+      "queries": {
+        "preview": {
+          "api": "webui_config_preview",
+          "version": "1"
+        }
+      },
+      "actions": {
+        "compose": {
+          "api": "webui_compose_config",
+          "version": "1",
+          "parameters": {
+            "rhythm_factor": {"type": "string", "required": false, "max_length": 8},
+            "followup_extract_hours": {"type": "string", "required": false, "max_length": 8},
+            "style_min_samples": {"type": "string", "required": false, "max_length": 8},
+            "absence_dip": {"type": "string", "required": false, "max_length": 8},
+            "reunion_boost": {"type": "string", "required": false, "max_length": 8},
+            "grudge_cap": {"type": "string", "required": false, "max_length": 8},
+            "energy_tau_hours": {"type": "string", "required": false, "max_length": 8},
+            "support_turns": {"type": "string", "required": false, "max_length": 8},
+            "ritual_min_days": {"type": "string", "required": false, "max_length": 8},
+            "thread_ttl_days": {"type": "string", "required": false, "max_length": 8},
+            "milestone_every_days": {"type": "string", "required": false, "max_length": 8},
+            "reciprocity_gap": {"type": "string", "required": false, "max_length": 8}
+          }
+        }
+      },
+      "content": [
+        {
+          "type": "text",
+          "value": "只填想改的项，留空表示保持原值。数字单位见说明；生成后粘贴到 config.toml 的对应段落并重载插件。",
+          "format": "plain"
+        },
+        {
+          "type": "collapsible",
+          "label": "节奏与风格",
+          "default_open": true,
+          "children": [
+            {"type": "input", "name": "rhythm_factor", "label": "沉默阈值倍数（1-20，默认 3）", "value": ""},
+            {"type": "input", "name": "followup_extract_hours", "label": "跟进整理间隔（小时，默认 6）", "value": ""},
+            {"type": "input", "name": "style_min_samples", "label": "风格样本下限（默认 20）", "value": ""}
+          ]
+        },
+        {
+          "type": "collapsible",
+          "label": "情绪与关系幅度",
+          "default_open": false,
+          "children": [
+            {"type": "input", "name": "absence_dip", "label": "缺席失落幅度（0-0.3，默认 0.06）", "value": ""},
+            {"type": "input", "name": "reunion_boost", "label": "重逢回升幅度（0-0.3，默认 0.08）", "value": ""},
+            {"type": "input", "name": "grudge_cap", "label": "遗怨上限（0-1，默认 0.3）", "value": ""},
+            {"type": "input", "name": "energy_tau_hours", "label": "能量恢复时间（小时，默认 8）", "value": ""}
+          ]
+        },
+        {
+          "type": "collapsible",
+          "label": "互动细节",
+          "default_open": false,
+          "children": [
+            {"type": "input", "name": "support_turns", "label": "倾诉持续条数（默认 2）", "value": ""},
+            {"type": "input", "name": "ritual_min_days", "label": "固定时段最少天数（默认 5）", "value": ""},
+            {"type": "input", "name": "thread_ttl_days", "label": "开放话题保留天数（默认 14）", "value": ""},
+            {"type": "input", "name": "milestone_every_days", "label": "里程碑间隔（天，默认 30）", "value": ""},
+            {"type": "input", "name": "reciprocity_gap", "label": "分享次数差阈值（默认 3）", "value": ""}
+          ]
+        },
+        {
+          "type": "button",
+          "label": "生成配置片段",
+          "action": "compose",
+          "variant": "primary"
+        },
+        {
+          "type": "card",
+          "label": "生成结果",
+          "children": [
+            {"type": "text", "value": {"source": "preview", "field": "status"}, "format": "plain"},
+            {"type": "text", "value": {"source": "preview", "field": "body"}, "format": "log"}
           ]
         }
       ]

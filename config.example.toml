@@ -81,6 +81,8 @@ boundary_ttl_days = 30.0
 # 非计划内长时间没联系时的轻微失落与重逢回升（按亲密度缩放）
 absence_dip_hours = 72.0
 absence_dip = 0.06
+# 一天内因缺席造成的心境下移总上限，避免多人同时失联时叠加
+absence_dip_daily_cap = 0.08
 reunion_boost = 0.08
 # 摩擦留下的短期余怒（按亲密度缩放）
 grudge_enabled = true
@@ -93,3 +95,29 @@ energy_tau_hours = 8.0
 peak_enabled = true
 peak_min_closeness = 0.35
 peak_cooldown_days = 5.0
+# 按对方自己的回复节奏判断沉默（慢回的人不算冷淡）
+rhythm_enabled = true
+rhythm_factor = 3.0
+# 摩擦严重度与修复回检
+repair_severity_scaling = true
+repair_escalation = true
+# 被划界后只在最初这段时间提示，之后静默避开
+boundary_notice_hours = 24.0
+# 聊到一半的话题
+threads_enabled = true
+thread_ttl_days = 14.0
+# 披露互惠
+reciprocity_enabled = true
+reciprocity_gap = 3
+# 固定聊天时段
+ritual_enabled = true
+ritual_min_days = 5
+ritual_cooldown_days = 7.0
+# 倾诉状态
+support_enabled = true
+support_turns = 2
+# 推测信息标注
+uncertainty_hints = true
+# 认识天数里程碑
+milestone_enabled = true
+milestone_every_days = 30
